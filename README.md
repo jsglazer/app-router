@@ -10,9 +10,12 @@ No settings GUI, no background bloat. The entire configuration is one hot-reload
 - **URL routing** — route URLs to a browser or a specific Chrome/Chromium profile using regex rules.
 - **Cursor popup selector** — appears only when two or more targets match; mouse, ↑/↓ navigation, and 1–9 direct selection, all handled locally (no Accessibility permission required).
 - **JSONC config** — comments allowed; validated and **hot-reloaded** on save.
-- **Atomic reloads** — a bad edit is rejected as a whole and the last-known-good config stays active, so a typo never breaks routing.
+- **Atomic reloads** — a bad edit is rejected as a whole and the last-known-good config stays active, so a typo never breaks routing. The file watcher survives atomic/editor "save-as-replace" writes (vim, most editors) and coalesces a burst of save events into a single reload.
+- **Non-blocking errors** — reload and startup config failures surface through the menu-bar item (and a notification), never a modal that seizes the app.
 - **No shell** — every target is executed as an argv array via `Process`; the file path or URL is always a discrete argument, so nothing in the config can be interpreted as shell syntax.
-- **Headless CLI harness** — `--route` resolves and prints targets without opening anything, so configs are testable end-to-end.
+- **Loop-safe system fallback** — a `system: true` target dispatches to the handler that owned the type *before* app-router registered itself, so making app-router the default handler can't create an open→app-router→open routing loop.
+- **Headless CLI harness** — `--route` resolves and prints targets without opening anything, so configs are testable end-to-end. Malformed CLI usage is a hard error, never a stray GUI launch.
+- **Unified logging** — route decisions, reload results, and registration outcomes are logged under subsystem `com.jsglazer.app-router` (view with `log stream --predicate 'subsystem == "com.jsglazer.app-router"'`).
 
 ## Requirements
 
@@ -25,7 +28,7 @@ No settings GUI, no background bloat. The entire configuration is one hot-reload
 swift build -c release
 ```
 
-The product is `app-router` (a menu-bar helper) in `.build/release/`.
+The product is `app-router` (a menu-bar helper) in `.build/release/`. The build currently produces a bare executable; packaging it as a `.app` bundle — required for Finder/browser open-event delivery and default-handler registration to take effect — is not yet automated, so those GUI features are only usable once the binary is wrapped in a bundle. The CLI and hot-reload paths work directly from the bare binary.
 
 ## Usage
 
@@ -43,9 +46,11 @@ Edit that file and save — the app validates and reloads it automatically. Use 
 app-router --route <url|path>     # print the resolved target(s) without opening anything
 app-router --test-url <url|path>  # alias of --route
 app-router --validate             # validate the config and exit (non-zero on error)
-app-router --config <path>        # use an alternate config file
+app-router --config <path>        # use an alternate config file (also honored for GUI launch)
 app-router --help
 ```
+
+An unrecognized flag, or a flag missing its value, prints usage to stderr and exits `64` (`EX_USAGE`) — it never falls through to launching the GUI. Running with no CLI flags launches the menu-bar helper.
 
 `--route` is the headless harness — it prints each resolved target and the exact argv that would be executed:
 
@@ -98,7 +103,9 @@ A target names exactly one destination:
 | `exec` (+ optional `args`) | shell executable / script | `<exec> <args…> <input>` |
 | `browser` | browser bundle | `open -a <browser> <input>` |
 | `browser` + `profile` | browser with a Chrome/Chromium profile | `<browser-binary> --profile-directory=<id> <input>` |
-| `system: true` | the macOS default handler | `open <input>` |
+| `system: true` | the macOS default handler | `open <input>`, or `open -b <previous-handler>` when app-router is itself the default (loop-safe) |
+
+Paths for `app`, `exec`, `browser`, and `bin` must be **absolute** (start with `/`); a relative path is rejected at validation time with a clear message rather than failing silently at launch.
 
 ### Routing policy
 
@@ -108,7 +115,7 @@ A target names exactly one destination:
 
 ### Handled types
 
-macOS Launch Services cannot make an app the default handler for a type it did not declare at build time. app-router declares its handled document types and URL schemes in its `Info.plist`; the router routes among **declared** extensions/UTIs and schemes. Adding a new type requires an app update and re-registration. Becoming a default handler is an explicit, user-initiated menu action — never automatic.
+macOS Launch Services cannot make an app the default handler for a type it did not declare at build time. app-router declares its handled document types and URL schemes in its `Info.plist`; the router routes among **declared** extensions/UTIs and schemes. Adding a new type requires an app update and re-registration. Becoming a default handler is an explicit, user-initiated menu action — never automatic; it runs off the main thread and reports how many types were registered, skipped, or failed. (Registration only takes effect once the binary is packaged as a `.app` bundle — see the Build note above.)
 
 ## Architecture
 
