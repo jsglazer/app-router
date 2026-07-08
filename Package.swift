@@ -40,6 +40,15 @@ let package = Package(
         .testTarget(
             name: "AppRouterCoreTests",
             dependencies: ["AppRouterCore"]
+        ),
+        // Shell-layer tests: default-handler registration flow (audit H2/C1) and the
+        // popup's single-fire selection contract (audit M4), driven through mocks.
+        .testTarget(
+            name: "AppRouterTests",
+            dependencies: ["AppRouter", "AppRouterCore"],
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency")
+            ]
         )
     ]
 )

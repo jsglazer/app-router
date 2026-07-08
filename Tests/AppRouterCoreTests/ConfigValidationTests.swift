@@ -65,6 +65,28 @@ import Testing
         try ConfigValidator.validate(config)
     }
 
+    // Audit L5: executable/bundle paths must be absolute so a relative path fails at
+    // reload (with an error surface) rather than silently beeping at launch.
+    @Test func rejectsRelativeAppPath() {
+        let config = RouterConfig(extensions: ["md": [TargetConfig(name: "Rel", app: "MyApp.app")]])
+        #expect(throws: ConfigError.self) { try ConfigValidator.validate(config) }
+    }
+
+    @Test func rejectsRelativeExecPath() {
+        let config = RouterConfig(extensions: ["md": [TargetConfig(name: "Rel", exec: "handle")]])
+        #expect(throws: ConfigError.self) { try ConfigValidator.validate(config) }
+    }
+
+    @Test func rejectsRelativeBinPath() {
+        let t = TargetConfig(name: "Rel", browser: "/Applications/Chrome.app", profile: "Default", bin: "chromium")
+        #expect(throws: ConfigError.self) { try ConfigValidator.validate(RouterConfig(extensions: ["md": [t]])) }
+    }
+
+    @Test func acceptsAbsolutePaths() throws {
+        let t = TargetConfig(name: "OK", exec: "/usr/local/bin/handle", args: ["--x"])
+        try ConfigValidator.validate(RouterConfig(extensions: ["md": [t]]))
+    }
+
     @Test func missingSectionsDefaultToEmpty() throws {
         let config = try ConfigLoader.load(jsonc: "{}")
         #expect(config.extensions.isEmpty)

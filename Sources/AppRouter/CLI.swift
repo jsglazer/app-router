@@ -1,47 +1,6 @@
 import Foundation
 import AppRouterCore
 
-/// Parsed CLI invocation. Present only when the process was launched in a headless mode
-/// (`--route`, `--validate`, `--help`); otherwise the GUI runs.
-public struct CLIInvocation {
-    public enum Mode {
-        case route(String)   // --route / --test-url <input>
-        case validate        // --validate
-        case help            // --help
-    }
-    public let mode: Mode
-    public let configPath: String?
-
-    /// Parses argv (already dropping the executable path). Returns `nil` for GUI launch.
-    public init?(parsing args: [String]) {
-        var mode: Mode?
-        var configPath: String?
-        var i = 0
-        while i < args.count {
-            switch args[i] {
-            case "--route", "--test-url":
-                i += 1
-                guard i < args.count else { return nil }
-                mode = .route(args[i])
-            case "--validate":
-                mode = .validate
-            case "--help", "-h":
-                mode = .help
-            case "--config":
-                i += 1
-                guard i < args.count else { return nil }
-                configPath = args[i]
-            default:
-                break
-            }
-            i += 1
-        }
-        guard let resolved = mode else { return nil }
-        self.mode = resolved
-        self.configPath = configPath
-    }
-}
-
 /// Headless entry point. The `--route` mode is the end-to-end test harness for the
 /// routing engine + config validation (Developer Decision 7): it prints the resolved
 /// target(s) and their argv **without opening anything or showing the GUI**.

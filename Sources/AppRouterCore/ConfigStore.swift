@@ -19,14 +19,22 @@ public enum ReloadResult: Equatable, Sendable {
 public final class ConfigStore: @unchecked Sendable {
     private let lock = NSLock()
     private var _current: RouterConfig
+    private var _engine: RoutingEngine
 
     public init(initial: RouterConfig) {
         self._current = initial
+        self._engine = RoutingEngine(config: initial)
     }
 
     /// The currently active configuration.
     public var current: RouterConfig {
         lock.withLock { _current }
+    }
+
+    /// The `RoutingEngine` for the active config, built once per reload rather than per
+    /// route event (audit L1). Rebuilt atomically inside `apply`.
+    public var currentEngine: RoutingEngine {
+        lock.withLock { _engine }
     }
 
     /// Validates `rawJSONC` and, only if it loads cleanly, swaps it in as `current`.
@@ -41,7 +49,11 @@ public final class ConfigStore: @unchecked Sendable {
         } catch {
             return .rejected(ConfigError("reload failed: \(error.localizedDescription)"))
         }
-        lock.withLock { _current = candidate }
+        let engine = RoutingEngine(config: candidate)
+        lock.withLock {
+            _current = candidate
+            _engine = engine
+        }
         return .applied
     }
 }

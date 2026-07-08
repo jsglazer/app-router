@@ -65,5 +65,20 @@ public enum ConfigValidator {
         if target.args != nil && target.exec == nil {
             throw ConfigError("\(context): target \"\(target.name)\" sets args without exec")
         }
+
+        // Executable/bundle paths must be absolute (audit L5). A relative path is resolved
+        // against the GUI app's working directory (`/`) and fails silently as a beep at
+        // launch time; rejecting it here surfaces the problem at reload with a clear error.
+        try requireAbsolute(target.app, field: "app", context: context, name: target.name)
+        try requireAbsolute(target.exec, field: "exec", context: context, name: target.name)
+        try requireAbsolute(target.browser, field: "browser", context: context, name: target.name)
+        try requireAbsolute(target.bin, field: "bin", context: context, name: target.name)
+    }
+
+    private static func requireAbsolute(_ path: String?, field: String, context: String, name: String) throws {
+        guard let path, !path.isEmpty else { return }
+        if !path.hasPrefix("/") {
+            throw ConfigError("\(context): target \"\(name)\" \(field) path must be absolute (start with \"/\"): \(path)")
+        }
     }
 }

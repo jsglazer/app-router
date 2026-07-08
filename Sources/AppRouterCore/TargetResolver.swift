@@ -13,10 +13,21 @@ public enum TargetResolver {
     ///
     /// Precondition: `target` passed `ConfigValidator` (exactly one primary field). The
     /// precedence below matches the validator's exclusivity so the result is total.
-    public static func argv(for target: TargetConfig, input: String) -> [String] {
+    ///
+    /// `systemHandlerBundleID` resolves the self-routing loop (audit C1): once app-router
+    /// registers itself as the default handler, a bare `open <input>` for a `system: true`
+    /// target asks Launch Services for the default handler — which is now app-router — and
+    /// loops forever. The shell records the *previous* default handler per type at
+    /// registration time and passes its bundle id here, so `system: true` dispatches to
+    /// `open -b <previous-handler>` and never back to itself. When nil (app-router is not a
+    /// default handler, or no prior handler was recorded) the bare `open` is safe.
+    public static func argv(
+        for target: TargetConfig,
+        input: String,
+        systemHandlerBundleID: String? = nil
+    ) -> [String] {
         if target.system == true {
-            // Defer to the macOS default handler.
-            return ["/usr/bin/open", input]
+            return systemArgv(input: input, bundleID: systemHandlerBundleID)
         }
 
         if let browser = target.browser {
@@ -41,6 +52,16 @@ public enum TargetResolver {
 
         // Unreachable for a validated target; degrade to the system handler rather than
         // crash.
+        return systemArgv(input: input, bundleID: systemHandlerBundleID)
+    }
+
+    /// argv for deferring to the macOS default handler. With a recorded previous-handler
+    /// bundle id, dispatch explicitly to it (`open -b`) so app-router never re-dispatches
+    /// to itself; otherwise fall back to a bare `open`.
+    private static func systemArgv(input: String, bundleID: String?) -> [String] {
+        if let bundleID, !bundleID.isEmpty {
+            return ["/usr/bin/open", "-b", bundleID, input]
+        }
         return ["/usr/bin/open", input]
     }
 

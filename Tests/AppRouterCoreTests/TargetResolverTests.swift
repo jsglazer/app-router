@@ -16,6 +16,23 @@ import Testing
         #expect(argv == ["/usr/bin/open", "https://a.com"])
     }
 
+    // Audit C1 regression: when a previous default handler is known, a `system: true`
+    // target must dispatch to it explicitly via `open -b`, never bare `open` (which, once
+    // app-router is the default handler, would resolve straight back to itself and loop).
+    @Test func systemTargetWithRecordedHandlerUsesOpenDashB() {
+        let t = TargetConfig(name: "System", system: true)
+        let argv = TargetResolver.argv(for: t, input: "https://a.com", systemHandlerBundleID: "com.apple.Safari")
+        #expect(argv == ["/usr/bin/open", "-b", "com.apple.Safari", "https://a.com"])
+        // Never the dangerous bare-open shape when a handler is supplied.
+        #expect(argv != ["/usr/bin/open", "https://a.com"])
+    }
+
+    @Test func systemTargetIgnoresEmptyRecordedHandler() {
+        let t = TargetConfig(name: "System", system: true)
+        let argv = TargetResolver.argv(for: t, input: "https://a.com", systemHandlerBundleID: "")
+        #expect(argv == ["/usr/bin/open", "https://a.com"])
+    }
+
     @Test func browserWithoutProfileUsesOpenDashA() {
         let t = TargetConfig(name: "Chrome", browser: "/Applications/Google Chrome.app")
         let argv = TargetResolver.argv(for: t, input: "https://a.com")

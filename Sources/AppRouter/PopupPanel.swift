@@ -13,6 +13,10 @@ public final class PopupPanel: NSPanel {
     private let targets: [TargetConfig]
     private var rows: [RowView] = []
     private var highlighted = 0
+    /// Guards against the callback firing more than once (audit M4). `choose(index:)`
+    /// closes the window, which synchronously triggers `resignKey()` → `cancel()` — a
+    /// second `close()` + `onSelect(nil)`. First finisher wins; the rest are no-ops.
+    private var didFinish = false
 
     public init(targets: [TargetConfig], at origin: NSPoint, onSelect: @escaping (TargetConfig?) -> Void) {
         self.targets = targets
@@ -21,7 +25,7 @@ public final class PopupPanel: NSPanel {
         let rowHeight: CGFloat = 28
         let width: CGFloat = 320
         let height = rowHeight * CGFloat(targets.count) + 8
-        let frame = NSRect(x: origin.x, y: origin.y - height, width: width, height: height)
+        let frame = Self.clampedFrame(at: origin, width: width, height: height)
 
         super.init(
             contentRect: frame,
@@ -30,6 +34,11 @@ public final class PopupPanel: NSPanel {
             defer: false
         )
 
+        // A programmatically created NSPanel defaults to isReleasedWhenClosed = true;
+        // combined with the outstanding strong reference the controller holds, a
+        // close-triggered release is a classic over-release/UAF (audit M4). Own the
+        // lifetime via ARC instead.
+        isReleasedWhenClosed = false
         isFloatingPanel = true
         level = .popUpMenu
         hidesOnDeactivate = false
@@ -40,6 +49,21 @@ public final class PopupPanel: NSPanel {
 
         buildContent(rowHeight: rowHeight, width: width)
         refreshHighlight()
+    }
+
+    /// Places the panel at the cursor but keeps it fully within the cursor's screen
+    /// (audit L2): the raw `origin.y - height` can push rows below the Dock or off the
+    /// bottom/right edge where they're clipped or invisible.
+    private static func clampedFrame(at origin: NSPoint, width: CGFloat, height: CGFloat) -> NSRect {
+        var x = origin.x
+        var y = origin.y - height
+        let screen = NSScreen.screens.first { NSMouseInRect(origin, $0.frame, false) }
+            ?? NSScreen.main
+        if let visible = screen?.visibleFrame {
+            x = min(max(x, visible.minX), visible.maxX - width)
+            y = min(max(y, visible.minY), visible.maxY - height)
+        }
+        return NSRect(x: x, y: y, width: width, height: height)
     }
 
     public override var canBecomeKey: Bool { true }
@@ -111,16 +135,21 @@ public final class PopupPanel: NSPanel {
         }
     }
 
-    private func choose(index: Int) {
+    func choose(index: Int) {
         guard index >= 0, index < targets.count else { cancel(); return }
-        let target = targets[index]
-        close()
-        onSelect(target)
+        finish(with: targets[index])
     }
 
-    private func cancel() {
+    func cancel() {
+        finish(with: nil)
+    }
+
+    /// Closes the panel and invokes `onSelect` exactly once (audit M4).
+    private func finish(with target: TargetConfig?) {
+        guard !didFinish else { return }
+        didFinish = true
         close()
-        onSelect(nil)
+        onSelect(target)
     }
 }
 

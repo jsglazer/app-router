@@ -21,13 +21,26 @@ public enum RouteResolution: Equatable, Sendable {
     case multiple([TargetConfig], RouteInput)
 }
 
+/// A URL rule with its regex compiled once at engine-construction time (audit L1). The
+/// pattern already passed `ConfigValidator`, so compilation is expected to succeed; a
+/// `nil` regex (should never occur for a validated config) simply never matches.
+private struct CompiledURLRule {
+    let regex: NSRegularExpression?
+    let targets: [TargetConfig]
+}
+
 /// The pure routing engine. Classifies an input, gathers candidate targets, and applies
 /// the 0 / 1 / ≥2 match-count policy. No AppKit, no I/O — 100% headlessly testable, and
 /// the same code path backs both the GUI and the `--route` CLI harness.
-public struct RoutingEngine: Sendable {
+///
+/// `@unchecked Sendable`: it caches compiled `NSRegularExpression`s (a reference type that
+/// is documented thread-safe for matching but not marked `Sendable`). The engine is
+/// immutable after `init` and only *reads* those regexes, so concurrent use is safe.
+public struct RoutingEngine: @unchecked Sendable {
     public let config: RouterConfig
 
     private let extensionLookup: [String: [TargetConfig]]
+    private let compiledURLRules: [CompiledURLRule]
 
     public init(config: RouterConfig) {
         self.config = config
@@ -37,6 +50,14 @@ public struct RoutingEngine: Sendable {
             lookup[ext.lowercased()] = targets
         }
         self.extensionLookup = lookup
+        // Compile every URL rule's regex once, up front (audit L1) — validation already
+        // proved these patterns compile.
+        self.compiledURLRules = config.urls.map { rule in
+            CompiledURLRule(
+                regex: try? NSRegularExpression(pattern: rule.match, options: [.caseInsensitive]),
+                targets: rule.targets
+            )
+        }
     }
 
     /// Classifies a raw argument as a URL (has a `scheme://` prefix) or a file path.
@@ -71,7 +92,7 @@ public struct RoutingEngine: Sendable {
         switch input {
         case .url(let urlString):
             var collected: [TargetConfig] = []
-            for rule in config.urls where Self.regexMatches(rule.match, urlString) {
+            for rule in compiledURLRules where Self.matches(rule.regex, urlString) {
                 collected.append(contentsOf: rule.targets)
             }
             return dedupe(collected)
@@ -113,10 +134,10 @@ public struct RoutingEngine: Sendable {
         return ext.lowercased()
     }
 
-    static func regexMatches(_ pattern: String, _ input: String) -> Bool {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return false
-        }
+    /// Whether a precompiled regex matches `input`. A `nil` regex (validation should have
+    /// prevented it) never matches.
+    static func matches(_ regex: NSRegularExpression?, _ input: String) -> Bool {
+        guard let regex else { return false }
         let range = NSRange(input.startIndex..<input.endIndex, in: input)
         return regex.firstMatch(in: input, options: [], range: range) != nil
     }
