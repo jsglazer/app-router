@@ -20,15 +20,39 @@ No settings GUI, no background bloat. The entire configuration is one hot-reload
 ## Requirements
 
 - macOS 14 or later
-- Swift 6 toolchain (Xcode 16+) to build from source
 
-## Build
+## Install
+
+1. Download **`app-router-<version>.dmg`** from the [latest release](https://github.com/jsglazer/app-router/releases/latest).
+2. Open the DMG and drag **app-router** onto the **Applications** shortcut.
+3. Launch it from Applications. It runs as a menu-bar helper (a `⇄` item, no Dock icon).
+4. Use the menu-bar item → **Register as Default Handler…** to have macOS route file/URL opens through app-router.
+
+That's it — a real `.app` bundle is what lets macOS deliver Finder/browser open events and lets app-router register as a default handler, and the DMG ships exactly that.
+
+> The released DMG is signed with a Developer ID and notarized, so it opens with a normal double-click. A locally built, ad-hoc-signed DMG will prompt Gatekeeper on first launch — right-click the app ▸ **Open** once to approve it.
+
+## Build from source
+
+Requires the Swift 6 toolchain (Xcode 16+).
 
 ```sh
-swift build -c release
+git clone https://github.com/jsglazer/app-router.git
+cd app-router
+Scripts/make-dmg.sh          # -> dist/app-router-<version>.dmg (build + bundle + sign + package)
 ```
 
-The product is `app-router` (a menu-bar helper) in `.build/release/`. The build currently produces a bare executable; packaging it as a `.app` bundle — required for Finder/browser open-event delivery and default-handler registration to take effect — is not yet automated, so those GUI features are only usable once the binary is wrapped in a bundle. The CLI and hot-reload paths work directly from the bare binary.
+`Scripts/make-dmg.sh` builds the release binary, wraps it in the `.app` bundle, code-signs it, and produces the drag-to-Applications DMG. It adapts to your keychain automatically:
+
+| What's in your keychain | Result |
+| --- | --- |
+| A **Developer ID Application** identity + a notarytool profile (`app-router-notary`) | Hardened-runtime signed, **notarized & stapled** |
+| A Developer ID identity only | Hardened-runtime signed (not notarized) |
+| Neither | **Ad-hoc** signed — fine for local use |
+
+Override detection with `SIGN_IDENTITY=…`, `NOTARY_PROFILE=…`, or `SKIP_NOTARIZE=1`. Regenerate the app icon with `Scripts/make-icon.sh`.
+
+For CLI-only use you can skip packaging entirely — `swift build -c release` drops a bare `app-router` binary in `.build/release/` that runs `--route`, `--validate`, etc. directly. Run the test suite with `swift test`.
 
 ## Usage
 
@@ -115,7 +139,7 @@ Paths for `app`, `exec`, `browser`, and `bin` must be **absolute** (start with `
 
 ### Handled types
 
-macOS Launch Services cannot make an app the default handler for a type it did not declare at build time. app-router declares its handled document types and URL schemes in its `Info.plist`; the router routes among **declared** extensions/UTIs and schemes. Adding a new type requires an app update and re-registration. Becoming a default handler is an explicit, user-initiated menu action — never automatic; it runs off the main thread and reports how many types were registered, skipped, or failed. (Registration only takes effect once the binary is packaged as a `.app` bundle — see the Build note above.)
+macOS Launch Services cannot make an app the default handler for a type it did not declare at build time. app-router declares its handled document types and URL schemes in its `Info.plist`; the router routes among **declared** extensions/UTIs and schemes. Adding a new type requires an app update and re-registration. Becoming a default handler is an explicit, user-initiated menu action — never automatic; it runs off the main thread and reports how many types were registered, skipped, or failed. (Registration works out of the box when you install the `.app` from the DMG — see [Install](#install).)
 
 ## Architecture
 
