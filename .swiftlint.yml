@@ -1,0 +1,39 @@
+# SwiftLint configuration for app-router.
+
+included:
+  - Sources
+  - Tests
+
+excluded:
+  - .build
+
+# Short names are idiomatic for loop indices, scanner cursors, and geometry.
+identifier_name:
+  allowed_symbols: ["_"]
+  min_length:
+    warning: 1
+    error: 1
+  excluded:
+    - i
+    - n
+    - c
+    - x
+    - y
+    - s
+    - id
+    - to
+    - on
+
+# The JSONC preprocessor is a single-pass character state machine; its branch count is
+# inherent to the grammar and clearer as one function than split across helpers.
+cyclomatic_complexity:
+  warning: 15
+  error: 25
+
+function_body_length:
+  warning: 60
+  error: 100
+
+line_length:
+  warning: 120
+  error: 160
