@@ -17,6 +17,9 @@
 #   SIGN_IDENTITY="Developer ID Application: Name (TEAMID)"   pin the identity
 #   NOTARY_PROFILE="app-router-notary"                        notarytool profile
 #   SKIP_NOTARIZE=1                                           sign but don't notarize
+#   SKIP_SIGN=1                                               no code signing: ad-hoc
+#       only (skip Developer ID + notarization entirely). Ad-hoc is the minimum a
+#       Mach-O needs to launch on Apple Silicon; the result is for local use only.
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -56,8 +59,13 @@ cp "$INFO_PLIST" "$APP/Contents/Info.plist"
 cp "$ICNS"       "$APP/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
-# 3. Resolve a signing identity (auto-detect a Developer ID unless pinned).
-if [ -z "${SIGN_IDENTITY:-}" ]; then
+# 3. Resolve a signing identity (auto-detect a Developer ID unless pinned or disabled).
+if [ -n "${SKIP_SIGN:-}" ]; then
+    # Explicit "no code signing": force the ad-hoc path even when a Developer ID is
+    # in the keychain, and skip notarization outright (step 4 requires a real signature).
+    echo "==> SKIP_SIGN set — no Developer ID signing, no notarization (ad-hoc, local use)"
+    SIGN_IDENTITY=""
+elif [ -z "${SIGN_IDENTITY:-}" ]; then
     # `|| true`: grep/head exiting non-zero (no Developer ID present, or SIGPIPE
     # from head closing early) must not trip `set -o pipefail` and abort the run.
     SIGN_IDENTITY="$(security find-identity -v -p codesigning \
