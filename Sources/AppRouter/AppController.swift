@@ -21,6 +21,11 @@ public final class AppController: NSObject, NSApplicationDelegate {
     private let startupError: ConfigError?
     /// This app's bundle identifier (injectable for tests, where `Bundle.main` has none).
     private let selfBundleID: String?
+    /// The build-time set of document-type UTIs / URL schemes declared in `Info.plist`.
+    /// Injectable so reconciliation can be unit-tested without a real app bundle (the test
+    /// bundle's `Bundle.main` declares none).
+    private let declaredUTIsProvider: @MainActor () -> [String]
+    private let declaredSchemesProvider: @MainActor () -> [String]
     private var reloader: ConfigReloader?
     private var statusItem: NSStatusItem?
     private var statusMenuItem: NSMenuItem?
@@ -33,7 +38,9 @@ public final class AppController: NSObject, NSApplicationDelegate {
         launcher: AppLauncher = SystemAppLauncher(),
         registry: HandlerRegistry = SystemHandlerRegistry(),
         stateStore: HandlerStateStore? = nil,
-        selfBundleID: String? = Bundle.main.bundleIdentifier
+        selfBundleID: String? = Bundle.main.bundleIdentifier,
+        declaredUTIs: (@MainActor () -> [String])? = nil,
+        declaredSchemes: (@MainActor () -> [String])? = nil
     ) {
         self.store = store
         self.configURL = configURL
@@ -41,6 +48,8 @@ public final class AppController: NSObject, NSApplicationDelegate {
         self.launcher = launcher
         self.registry = registry
         self.selfBundleID = selfBundleID
+        self.declaredUTIsProvider = declaredUTIs ?? { Self.infoPlistUTIs() }
+        self.declaredSchemesProvider = declaredSchemes ?? { Self.infoPlistSchemes() }
         self.stateStore = stateStore
             ?? FileHandlerStateStore(url: FileHandlerStateStore.defaultURL(configPath: configURL.path))
     }
@@ -56,7 +65,12 @@ public final class AppController: NSObject, NSApplicationDelegate {
             Log.config.error("startup config error: \(startupError.message, privacy: .public)")
             showStatus("Config not loaded: \(startupError.message)", isError: true)
             presentInfo("Config not loaded", body: "app-router started with an empty routing table.\n\n\(startupError.message)")
+            return
         }
+        // Config-driven registration (Update02): on launch make app-router the default
+        // handler for exactly the extensions/schemes the current config uses. Idempotent —
+        // types already owned are skipped, so this only prompts for genuinely new types.
+        Task { await self.autoReconcileHandlers() }
     }
 
     private func setupStatusItem() {
@@ -93,6 +107,10 @@ public final class AppController: NSObject, NSApplicationDelegate {
         case .applied:
             Log.config.info("config reloaded successfully")
             showStatus(nil, isError: false)
+            // Auto-register on save (Update02): reconcile the OS default handlers to the
+            // just-applied config — register newly-added extensions, restore the prior
+            // handler for any the config no longer references.
+            Task { await self.autoReconcileHandlers() }
         case .rejected(let error):
             Log.config.error("reload rejected: \(error.message, privacy: .public)")
             showStatus("Config not reloaded: \(error.message)", isError: true)
@@ -205,33 +223,73 @@ public final class AppController: NSObject, NSApplicationDelegate {
         NSWorkspace.shared.activateFileViewerSelecting([configURL])
     }
 
-    /// Explicit, idempotent default-handler registration (Decision 2). Runs off the main
-    /// thread (audit H2) and records the prior handler for each type (audit C1) so the
-    /// `system: true` fallback can later dispatch back to it instead of looping.
+    /// Manual "Register as Default Handler…" menu action. Now config-driven (Update02): it
+    /// reconciles the OS default handlers to the *current* config and reports the result,
+    /// including any config extensions that fall outside app-router's built-in type set.
     @objc private func registerDefaults() {
         Task {
-            let result = await register(utis: declaredUTIs(), schemes: declaredSchemes())
-            let summary = "Registered \(result.registered), skipped \(result.skipped), failed \(result.failed)."
+            let result = await reconcileHandlers(for: store.current)
+            var summary = "Registered \(result.registered), restored \(result.restored), failed \(result.failed)."
+            if !result.unsupported.isEmpty {
+                summary += "\n\nNot in app-router's built-in type set (can't be registered without an app update): "
+                    + result.unsupported.sorted().map { ".\($0)" }.joined(separator: ", ") + "."
+            }
             Log.registration.notice("registration complete — \(summary, privacy: .public)")
-            showStatus(result.failed > 0 ? "\(result.failed) handler registration(s) failed or were denied." : nil,
+            showStatus(result.failed > 0 ? "\(result.failed) handler change(s) failed or were denied." : nil,
                        isError: result.failed > 0)
             presentInfo("Default handler registration", body: summary)
         }
     }
 
-    /// The registration core (audit H2/C1), separated from menu/UI so it can be unit-tested
-    /// with a mock registry: skips types already pointing at app-router, records the prior
-    /// handler for each type it takes over (so the C1 fallback can dispatch back to it),
-    /// persists the recorded state, and reports how many succeeded / were skipped / failed.
+    /// Fire-and-forget reconcile used by launch and hot-reload. Silent on a clean pass;
+    /// only surfaces the non-blocking menu-bar state when something failed or a config
+    /// extension can't be registered — auto-registration must never nag with a modal.
+    private func autoReconcileHandlers() async {
+        let result = await reconcileHandlers(for: store.current)
+        if result.registered > 0 || result.restored > 0 {
+            Log.registration.notice("auto-reconcile — registered \(result.registered, privacy: .public), restored \(result.restored, privacy: .public)")
+        }
+        if result.failed > 0 {
+            showStatus("\(result.failed) handler change(s) failed or were denied.", isError: true)
+        } else if !result.unsupported.isEmpty {
+            let list = result.unsupported.sorted().map { ".\($0)" }.joined(separator: ", ")
+            showStatus("Not registerable (not in built-in type set): \(list)", isError: true)
+        } else {
+            showStatus(nil, isError: false)
+        }
+    }
+
+    // MARK: - Config-driven handler reconciliation (Update02)
+
+    /// UTIs app-router must never claim, even if a config extension resolves to one. These
+    /// supertypes match huge swaths of files; declaring/registering them is exactly what
+    /// made app-router the handler for every text file (including its own config.jsonc) and
+    /// fed the focus-stealing routing loop. This denylist enforces "config extensions,
+    /// nothing else" defensively, independent of what Info.plist happens to declare.
+    private static let overBroadUTIs: Set<String> = [
+        "public.item", "public.content", "public.composite-content",
+        "public.data", "public.text", "public.plain-text",
+        "public.source-code", "public.script", "public.executable"
+    ]
+
+    /// Reconciles OS default handlers to `config` (audit H2/C1, Update02): registers the
+    /// extensions/schemes the config uses (recording each prior handler so the C1 fallback
+    /// can dispatch back to it), and restores the prior handler for any type app-router
+    /// owns that the config no longer references. Skips types already pointing at
+    /// app-router. Returns counts plus the config extensions that can't be registered
+    /// because they're outside the build-time declared set.
     @discardableResult
-    func register(utis: [String], schemes: [String]) async -> (registered: Int, skipped: Int, failed: Int) {
+    func reconcileHandlers(for config: RouterConfig) async -> (registered: Int, restored: Int, failed: Int, unsupported: [String]) {
         let selfID = selfBundleID
         var state = stateStore.load()
-        var registered = 0, skipped = 0, failed = 0
+        let (wantUTIs, unsupported) = desiredUTIs(for: config)
+        let wantSchemes = desiredSchemes(for: config)
+        var registered = 0, restored = 0, failed = 0
 
-        for uti in utis {
+        // Take over newly-desired UTIs we don't already own.
+        for uti in wantUTIs {
             let current = registry.currentDefaultHandler(forUTI: uti)
-            if current == selfID { skipped += 1; continue }
+            if current == selfID { continue }
             if let current { state.recordUTI(uti, previous: current) }
             do {
                 try await registry.setDefaultHandler(forUTI: uti)
@@ -241,9 +299,23 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 Log.registration.error("UTI \(uti, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
             }
         }
-        for scheme in schemes {
+        // Relinquish UTIs we own but the config no longer references.
+        for (uti, previous) in state.utis where !wantUTIs.contains(uti) {
+            if registry.currentDefaultHandler(forUTI: uti) == selfID {
+                do {
+                    try await registry.restoreDefaultHandler(forUTI: uti, toBundleID: previous)
+                    restored += 1
+                } catch {
+                    failed += 1
+                    Log.registration.error("restore UTI \(uti, privacy: .public) → \(previous, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+            state.utis[uti] = nil
+        }
+        // Take over newly-desired schemes we don't already own.
+        for scheme in wantSchemes {
             let current = registry.currentDefaultHandler(forScheme: scheme)
-            if current == selfID { skipped += 1; continue }
+            if current == selfID { continue }
             if let current { state.recordScheme(scheme, previous: current) }
             do {
                 try await registry.setDefaultHandler(forScheme: scheme)
@@ -253,18 +325,59 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 Log.registration.error("scheme \(scheme, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
             }
         }
+        // Relinquish schemes we own but the config no longer references.
+        for (scheme, previous) in state.schemes where !wantSchemes.contains(scheme) {
+            if registry.currentDefaultHandler(forScheme: scheme) == selfID {
+                do {
+                    try await registry.restoreDefaultHandler(forScheme: scheme, toBundleID: previous)
+                    restored += 1
+                } catch {
+                    failed += 1
+                    Log.registration.error("restore scheme \(scheme, privacy: .public) → \(previous, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+            state.schemes[scheme] = nil
+        }
 
         stateStore.save(state)
-        return (registered, skipped, failed)
+        return (registered, restored, failed, unsupported)
     }
 
-    private func declaredUTIs() -> [String] {
+    /// The UTIs app-router should own for `config`: each config extension resolved to its
+    /// system UTI, kept only when that UTI is build-time declared *and* not over-broad.
+    /// Extensions that resolve to no UTI, an undeclared UTI, or an over-broad supertype are
+    /// returned as `unsupported` so the shell can tell the user they need an app update.
+    private func desiredUTIs(for config: RouterConfig) -> (utis: Set<String>, unsupported: [String]) {
+        let declared = Set(declaredUTIsProvider())
+        var utis = Set<String>()
+        var unsupported: [String] = []
+        for ext in config.extensions.keys {
+            let key = ext.lowercased()
+            guard let uti = UTType(filenameExtension: key)?.identifier,
+                  !Self.overBroadUTIs.contains(uti),
+                  declared.contains(uti) else {
+                unsupported.append(key)
+                continue
+            }
+            utis.insert(uti)
+        }
+        return (utis, unsupported)
+    }
+
+    /// The URL schemes app-router should own for `config`: the declared schemes, but only
+    /// when the config actually has URL rules to route. With no `urls`, app-router does not
+    /// claim the browser role — matching "default for what the config uses, nothing else."
+    private func desiredSchemes(for config: RouterConfig) -> Set<String> {
+        config.urls.isEmpty ? [] : Set(declaredSchemesProvider())
+    }
+
+    private static func infoPlistUTIs() -> [String] {
         (Bundle.main.object(forInfoDictionaryKey: "CFBundleDocumentTypes") as? [[String: Any]])?
             .compactMap { $0["LSItemContentTypes"] as? [String] }
             .flatMap { $0 } ?? []
     }
 
-    private func declaredSchemes() -> [String] {
+    private static func infoPlistSchemes() -> [String] {
         (Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes") as? [[String: Any]])?
             .compactMap { $0["CFBundleURLSchemes"] as? [String] }
             .flatMap { $0 } ?? []

@@ -20,6 +20,12 @@ public protocol HandlerRegistry: Sendable {
     func setDefaultHandler(forUTI uti: String) async throws
     /// Registers this app as default for a URL scheme. May prompt the user.
     func setDefaultHandler(forScheme scheme: String) async throws
+    /// Hands a UTI back to `bundleID` — the handler that owned it before app-router took
+    /// over. Used when the config no longer references a type (Update02), so app-router
+    /// relinquishes it instead of remaining the stale default. May prompt the user.
+    func restoreDefaultHandler(forUTI uti: String, toBundleID bundleID: String) async throws
+    /// Hands a URL scheme back to its prior handler `bundleID`. May prompt the user.
+    func restoreDefaultHandler(forScheme scheme: String, toBundleID bundleID: String) async throws
 }
 
 /// Production Launch Services adapter. The **only** place in the codebase that calls
@@ -65,6 +71,33 @@ public final class SystemHandlerRegistry: HandlerRegistry, @unchecked Sendable {
     public func setDefaultHandler(forScheme scheme: String) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             workspace.setDefaultApplication(at: selfBundleURL, toOpenURLsWithScheme: scheme) { error in
+                if let error { continuation.resume(throwing: error) }
+                else { continuation.resume() }
+            }
+        }
+    }
+
+    public func restoreDefaultHandler(forUTI uti: String, toBundleID bundleID: String) async throws {
+        guard let type = UTType(uti) else {
+            throw ConfigError("unknown UTI: \(uti)")
+        }
+        guard let appURL = workspace.urlForApplication(withBundleIdentifier: bundleID) else {
+            throw ConfigError("previous handler \(bundleID) for \(uti) is no longer installed")
+        }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            workspace.setDefaultApplication(at: appURL, toOpen: type) { error in
+                if let error { continuation.resume(throwing: error) }
+                else { continuation.resume() }
+            }
+        }
+    }
+
+    public func restoreDefaultHandler(forScheme scheme: String, toBundleID bundleID: String) async throws {
+        guard let appURL = workspace.urlForApplication(withBundleIdentifier: bundleID) else {
+            throw ConfigError("previous handler \(bundleID) for scheme \(scheme) is no longer installed")
+        }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            workspace.setDefaultApplication(at: appURL, toOpenURLsWithScheme: scheme) { error in
                 if let error { continuation.resume(throwing: error) }
                 else { continuation.resume() }
             }

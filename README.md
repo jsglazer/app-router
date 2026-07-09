@@ -15,6 +15,7 @@ No settings GUI, no background bloat. The entire configuration is one hot-reload
 - **Atomic reloads** — a bad edit is rejected as a whole and the last-known-good config stays active, so a typo never breaks routing. The file watcher survives atomic/editor "save-as-replace" writes (vim, most editors) and coalesces a burst of save events into a single reload.
 - **Non-blocking errors** — reload and startup config failures surface through the menu-bar item (and a notification), never a modal that seizes the app.
 - **No shell** — every target is executed as an argv array via `Process`; the file path or URL is always a discrete argument, so nothing in the config can be interpreted as shell syntax.
+- **Config-driven default handler** — app-router registers itself as the macOS default handler for exactly the extensions/URL schemes your config uses, and **nothing else**. Add an extension and save; it takes the type over (recording the prior handler). Remove it and save; it hands the type back to whoever owned it before. Registration is scoped to a curated, build-time set of specific document types — never an over-broad supertype like "all plain text."
 - **Loop-safe system fallback** — a `system: true` target dispatches to the handler that owned the type *before* app-router registered itself, so making app-router the default handler can't create an open→app-router→open routing loop.
 - **Headless CLI harness** — `--route` resolves and prints targets without opening anything, so configs are testable end-to-end. Malformed CLI usage is a hard error, never a stray GUI launch.
 - **Unified logging** — route decisions, reload results, and registration outcomes are logged under subsystem `com.jsglazer.app-router` (view with `log stream --predicate 'subsystem == "com.jsglazer.app-router"'`).
@@ -28,7 +29,7 @@ No settings GUI, no background bloat. The entire configuration is one hot-reload
 1. Download **`app-router-<version>.dmg`** from the [latest release](https://github.com/jsglazer/app-router/releases/latest).
 2. Open the DMG and drag **app-router** onto the **Applications** shortcut.
 3. Launch it from Applications. It runs as a menu-bar helper (a `⇄` item, no Dock icon).
-4. Use the menu-bar item → **Register as Default Handler…** to have macOS route file/URL opens through app-router.
+4. On launch and on every config save, app-router automatically registers as the default handler for the extensions/URL schemes your config uses — macOS prompts you to approve each new type once. Use the menu-bar item → **Register as Default Handler…** to (re)apply on demand.
 
 That's it — a real `.app` bundle is what lets macOS deliver Finder/browser open events and lets app-router register as a default handler, and the DMG ships exactly that.
 
@@ -139,9 +140,18 @@ Paths for `app`, `exec`, `browser`, and `bin` must be **absolute** (start with `
 - **1 match** → opens immediately, no popup.
 - **2+ matches** → the cursor-aligned popup selector.
 
-### Handled types
+### Handled types & default-handler registration
 
-macOS Launch Services cannot make an app the default handler for a type it did not declare at build time. app-router declares its handled document types and URL schemes in its `Info.plist`; the router routes among **declared** extensions/UTIs and schemes. Adding a new type requires an app update and re-registration. Becoming a default handler is an explicit, user-initiated menu action — never automatic; it runs off the main thread and reports how many types were registered, skipped, or failed. (Registration works out of the box when you install the `.app` from the DMG — see [Install](#install).)
+macOS Launch Services cannot make an app the default handler for a type it did not declare at build time. app-router declares a **curated set of specific document types** (Markdown, JSON, YAML, XML, HTML, CSV, PDF, SVG, RTF) and URL schemes (`http`/`https`) in its `Info.plist` — never an over-broad supertype like `public.plain-text`, which would silently make it a handler for *every* text file.
+
+Registration is **config-driven and automatic**. On launch and on every config save, app-router reconciles the OS default handlers to your config:
+
+- Each file extension in `extensions` is resolved to its system UTI. If that UTI is in the declared set, app-router registers itself as the default handler for it (recording the handler that owned it before, so a `system: true` fallback can dispatch back without looping).
+- When URL rules are present, app-router claims the `http`/`https` handler role; with no URL rules, it leaves the browser role alone.
+- Removing an extension (or all URL rules) and saving **hands the type back** to its recorded prior handler — app-router doesn't remain a stale default.
+- An extension whose type isn't in the curated set can't be registered; app-router flags it in the menu-bar state rather than silently doing nothing. Supporting a genuinely new type means adding its UTI to `Info.plist` and rebuilding.
+
+macOS prompts you to approve each *new* type once; types already pointing at app-router are skipped, so a save that adds nothing new prompts for nothing. The **Register as Default Handler…** menu item re-runs the same reconciliation on demand. (Registration works out of the box when you install the `.app` from the DMG — see [Install](#install).)
 
 ## Architecture
 
