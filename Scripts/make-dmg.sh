@@ -79,8 +79,11 @@ codesign --verify --strict --verbose=2 "$APP"
 # 4. Notarize — only when Developer-ID-signed and a notary profile exists.
 NOTARY_PROFILE="${NOTARY_PROFILE:-app-router-notary}"
 NOTARIZED=0
+# Authoritatively test the profile via notarytool itself — recent Xcode stores the
+# credential where `security find-generic-password` can't reliably see it, so probe
+# by using it (a lightweight authenticated call) rather than grepping the keychain.
 have_profile() {
-    security find-generic-password -s "com.apple.gke.notary.tool" -a "$1" >/dev/null 2>&1
+    xcrun notarytool history --keychain-profile "$1" >/dev/null 2>&1
 }
 if [ "$SIGNED_REAL" = 1 ] && [ -z "${SKIP_NOTARIZE:-}" ] \
    && [ -n "$NOTARY_PROFILE" ] && have_profile "$NOTARY_PROFILE"; then
@@ -105,8 +108,15 @@ hdiutil create -volname "$APP_NAME $VERSION" \
     -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
 rm -rf "$STAGE"
 
-# 6. Staple the DMG too when notarized (so it verifies offline).
-[ "$NOTARIZED" = 1 ] && xcrun stapler staple "$DMG"
+# 6. Notarize + staple the DMG itself. The app inside is already notarized+stapled
+#    (step 4), so the extracted app validates offline; notarizing the DMG (its own
+#    submission — a DMG needs its own ticket, it is not covered by the app's) makes
+#    the downloaded disk image pass Gatekeeper before it is even mounted.
+if [ "$NOTARIZED" = 1 ]; then
+    echo "==> notarizing the DMG (submits to Apple, waits)"
+    xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun stapler staple "$DMG"
+fi
 
 echo
 echo "==> DONE"
