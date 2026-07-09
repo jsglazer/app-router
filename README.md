@@ -1,5 +1,7 @@
 # app-router
 
+[![Release](https://img.shields.io/github/v/release/jsglazer/app-router)](https://github.com/jsglazer/app-router/releases/latest) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A lightweight, local-first macOS router for files and URLs — a slim alternative to OpenIn 4. When you open a file or a link, app-router picks the destination from a single JSONC config: a specific app for a file extension, or a specific browser (and Chrome profile) for a URL. When more than one destination matches, it shows a cursor-aligned popup you can drive with the mouse, the arrow keys, or number keys.
 
 No settings GUI, no background bloat. The entire configuration is one hot-reloaded JSONC file you can back up, diff, and version like any other dotfile.
