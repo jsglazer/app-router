@@ -14,6 +14,9 @@ No settings GUI, no background bloat. The entire configuration is one hot-reload
 - **JSONC config** — comments allowed; validated and **hot-reloaded** on save.
 - **Atomic reloads** — a bad edit is rejected as a whole and the last-known-good config stays active, so a typo never breaks routing. The file watcher survives atomic/editor "save-as-replace" writes (vim, most editors) and coalesces a burst of save events into a single reload.
 - **Non-blocking errors** — reload and startup config failures surface through the menu-bar item (and a notification), never a modal that seizes the app.
+- **Validate config on demand** — a **Validate Config…** menu item re-parses `config.jsonc` (JSONC → decode → schema) *and* checks that every referenced app/exec/browser actually exists on disk, reporting the result in a single alert: valid, valid-with-warnings (which paths are missing), or invalid (the exact parse/schema error).
+- **Missing-app errors** — a mistyped or missing target path surfaces a clear "App not found" message (with the offending path) instead of a silent no-op `open`.
+- **Single instance** — only one menu-bar helper stays resident. If macOS launches a duplicate (e.g. a stray registered copy, or an App-Translocated download), that instance routes the open event it was launched for and then quits, so you never end up with two `⇄` icons.
 - **No shell** — every target is executed as an argv array via `Process`; the file path or URL is always a discrete argument, so nothing in the config can be interpreted as shell syntax.
 - **Config-driven default handler** — app-router registers itself as the macOS default handler for exactly the extensions/URL schemes your config uses, and **nothing else**. Add an extension and save; it takes the type over (recording the prior handler). Remove it and save; it hands the type back to whoever owned it before. Registration is scoped to a curated, build-time set of specific document types — never an over-broad supertype like "all plain text."
 - **Loop-safe system fallback** — a `system: true` target dispatches to the handler that owned the type *before* app-router registered itself, so making app-router the default handler can't create an open→app-router→open routing loop.
@@ -65,7 +68,7 @@ Launch the app to run as a menu-bar helper. On first run it writes a starter con
 ~/.config/app-router/config.jsonc
 ```
 
-Edit that file and save — the app validates and reloads it automatically. Use the menu-bar item to reveal the config in Finder or to register app-router as a default handler.
+Edit that file and save — the app validates and reloads it automatically. The menu-bar item lets you reveal the config in Finder, **Validate Config…** on demand (checks the JSONC parses and that every referenced app exists on disk), or register app-router as a default handler.
 
 ### CLI
 
@@ -132,7 +135,7 @@ A target names exactly one destination:
 | `browser` + `profile` | browser with a Chrome/Chromium profile | `<browser-binary> --profile-directory=<id> <input>` |
 | `system: true` | the macOS default handler | `open <input>`, or `open -b <previous-handler>` when app-router is itself the default (loop-safe) |
 
-Paths for `app`, `exec`, `browser`, and `bin` must be **absolute** (start with `/`); a relative path is rejected at validation time with a clear message rather than failing silently at launch.
+Paths for `app`, `exec`, `browser`, and `bin` must be **absolute** (start with `/`); a relative path is rejected at validation time with a clear message rather than failing silently at launch. An absolute path that doesn't exist on disk (a typo) is caught too — **Validate Config…** lists it up front, and opening a file that routes to it surfaces a clear "App not found" error instead of a silent failure.
 
 ### Routing policy
 
