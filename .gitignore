@@ -1,0 +1,18 @@
+NewBuild/
+.DS_Store
+.gitignore
+CLAUDE.md
+GEMINI.md
+
+# Packaging output (make-dmg.sh)
+dist/
+
+# Swift / SwiftPM build artifacts
+.build/
+.swiftpm/
+Package.resolved
+*.xcodeproj
+
+# plistaddreg.py backup (repo-root, generated)
+Info.plist.bak
+__pycache__/
