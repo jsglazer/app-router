@@ -77,6 +77,32 @@ import Testing
         #expect(argv.count == 4)
     }
 
+    // primaryExecutablePath (Update03): the one path the shell must confirm exists before
+    // launching, so a mistyped config path becomes a clear error instead of a silent fail.
+    @Test func primaryPathIsNilForSystemTarget() {
+        #expect(TargetResolver.primaryExecutablePath(for: TargetConfig(name: "System", system: true)) == nil)
+    }
+
+    @Test func primaryPathForAppIsTheBundle() {
+        let t = TargetConfig(name: "mdView", app: "/Applications/mdView.app")
+        #expect(TargetResolver.primaryExecutablePath(for: t) == "/Applications/mdView.app")
+    }
+
+    @Test func primaryPathForExecIsTheExecutable() {
+        let t = TargetConfig(name: "Script", exec: "/usr/local/bin/handle", args: ["--flag"])
+        #expect(TargetResolver.primaryExecutablePath(for: t) == "/usr/local/bin/handle")
+    }
+
+    @Test func primaryPathForBrowserIsTheBundle() {
+        let t = TargetConfig(name: "Chrome", browser: "/Applications/Google Chrome.app")
+        #expect(TargetResolver.primaryExecutablePath(for: t) == "/Applications/Google Chrome.app")
+    }
+
+    @Test func primaryPathHonoursExplicitBinOverBrowserBundle() {
+        let t = TargetConfig(name: "Chromium", browser: "/A.app", profile: "Default", bin: "/custom/chromium")
+        #expect(TargetResolver.primaryExecutablePath(for: t) == "/custom/chromium")
+    }
+
     @Test func browserExecutablePathDerivation() {
         #expect(
             TargetResolver.browserExecutablePath(forBundle: "/Applications/Google Chrome.app")

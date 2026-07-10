@@ -30,6 +30,10 @@ public final class AppController: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var statusMenuItem: NSMenuItem?
     private var activePanel: PopupPanel?
+    /// True when this process was launched as a *duplicate* while another app-router was
+    /// already resident (Update03). Such an instance routes whatever open event it was
+    /// launched for, then terminates — it never installs a second menu-bar item.
+    private var isTransientInstance = false
 
     public init(
         store: ConfigStore,
@@ -57,6 +61,23 @@ public final class AppController: NSObject, NSApplicationDelegate {
     // MARK: - Lifecycle
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
+        // Single-instance guard (Update03): app-router is a resident menu-bar singleton,
+        // but macOS can spawn a *second* copy to deliver an open event — when more than
+        // one bundle with this identifier is registered with Launch Services (e.g. a
+        // backup copy in Dropbox/iCloud) or the primary copy is App-Translocated out of a
+        // quarantined download. A second resident instance leaves a duplicate ⇄ menu-bar
+        // icon that never quits. If another instance is already running, treat this launch
+        // as transient: skip the status item and hot-reload, route the open event we were
+        // launched for, then terminate — leaving the original as the sole handler.
+        if hasOtherRunningInstance() {
+            isTransientInstance = true
+            Log.routing.notice("another app-router instance is running; this launch is transient")
+            // Backstop for a bare relaunch that carries no open event: exit once idle.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                self?.finishTransientIfNeeded()
+            }
+            return
+        }
         setupStatusItem()
         startHotReload()
         // Surface a startup config failure once (audit M3): otherwise the menu bar looks
@@ -81,6 +102,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
         menu.addItem(status)
         menu.addItem(.separator())
         menu.addItem(withTitle: "Reveal Config in Finder", action: #selector(revealConfig), keyEquivalent: "")
+        menu.addItem(withTitle: "Validate Config…", action: #selector(validateConfig), keyEquivalent: "")
         menu.addItem(withTitle: "Register as Default Handler…", action: #selector(registerDefaults), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -137,14 +159,29 @@ public final class AppController: NSObject, NSApplicationDelegate {
         case .none:
             Log.routing.notice("no route for input: \(raw, privacy: .public)")
             NSSound.beep()
+            finishTransientIfNeeded()
         case .fallback(let target, _), .single(let target, _):
             launch(target, input: raw)
+            finishTransientIfNeeded()
         case .multiple(let targets, _):
             presentPopup(targets: targets, input: raw)
         }
     }
 
     private func launch(_ target: TargetConfig, input: String) {
+        // App-not-found error (Update03): surface a mistyped/missing path as a clear
+        // message instead of a silent `open` failure. A `system` target has no local path
+        // to verify (nil), so it is never blocked here.
+        if let path = TargetResolver.primaryExecutablePath(for: target),
+           !FileManager.default.fileExists(atPath: path) {
+            Log.routing.error("target \"\(target.name, privacy: .public)\" not found at \(path, privacy: .public)")
+            showStatus("“\(target.name)” not found at \(path) — check config.jsonc.", isError: true)
+            presentInfo("App not found",
+                        body: "Can't open with “\(target.name)”.\n\nNothing exists at:\n\(path)\n\nCheck the path in config.jsonc — it may be misspelled.")
+            NSSound.beep()
+            return
+        }
+
         let routeInput = store.currentEngine.classify(input)
         var systemBundleID: String?
         if target.system == true {
@@ -174,11 +211,32 @@ public final class AppController: NSObject, NSApplicationDelegate {
         let origin = NSEvent.mouseLocation
         let panel = PopupPanel(targets: targets, at: origin) { [weak self] chosen in
             self?.activePanel = nil
-            guard let chosen else { return }
-            self?.launch(chosen, input: input)
+            if let chosen { self?.launch(chosen, input: input) }
+            self?.finishTransientIfNeeded()
         }
         activePanel = panel
         panel.makeKeyAndOrderFront(nil)
+    }
+
+    // MARK: - Single-instance lifecycle (Update03)
+
+    /// Whether another app-router process (any registered copy, at any path) is already
+    /// running. Matching on the bundle identifier catches duplicates launched from a
+    /// backup copy or an App-Translocation path, not just the primary in /Applications.
+    private func hasOtherRunningInstance() -> Bool {
+        guard let selfID = selfBundleID else { return false }
+        let current = NSRunningApplication.current
+        return NSRunningApplication
+            .runningApplications(withBundleIdentifier: selfID)
+            .contains { $0 != current }
+    }
+
+    /// Terminate a transient instance once it has finished routing (no popup still open).
+    /// A no-op for the resident instance and while a selection popup is on screen.
+    private func finishTransientIfNeeded() {
+        guard isTransientInstance, activePanel == nil else { return }
+        Log.routing.notice("transient app-router instance done; terminating")
+        NSApp.terminate(nil)
     }
 
     // MARK: - C1 system-handler resolution
@@ -221,6 +279,80 @@ public final class AppController: NSObject, NSApplicationDelegate {
 
     @objc private func revealConfig() {
         NSWorkspace.shared.activateFileViewerSelecting([configURL])
+    }
+
+    /// "Validate Config…" menu action (Update03): re-reads config.jsonc from disk, runs the
+    /// full JSONC → decode → schema-validate pipeline, and additionally checks that every
+    /// referenced app/exec/browser path exists on disk. Reports the outcome in a modal
+    /// alert (a user-initiated action, so blocking is appropriate — unlike hot-reload).
+    @objc private func validateConfig() {
+        let result = Self.validateConfigFile(at: configURL)
+        presentAlert(title: result.title, body: result.body, style: result.style)
+    }
+
+    /// Pure-ish validation summary used by the Validate Config action. Reads the file, then
+    /// classifies the outcome as valid, valid-with-missing-paths, or invalid.
+    static func validateConfigFile(at url: URL) -> (title: String, body: String, style: NSAlert.Style) {
+        let raw: String
+        do {
+            raw = try String(contentsOf: url, encoding: .utf8)
+        } catch {
+            return ("Can’t read config", "Couldn’t read \(url.path):\n\n\(error.localizedDescription)", .critical)
+        }
+        let config: RouterConfig
+        do {
+            config = try ConfigLoader.load(jsonc: raw)
+        } catch let error as ConfigError {
+            return ("Config is invalid", "\(error.message)\n\nThe previously loaded config is still active.", .critical)
+        } catch {
+            return ("Config is invalid", "\(error.localizedDescription)\n\nThe previously loaded config is still active.", .critical)
+        }
+
+        let extCount = config.extensions.count
+        let urlCount = config.urls.count
+        let summary = "\(extCount) extension\(extCount == 1 ? "" : "s"), "
+            + "\(urlCount) URL rule\(urlCount == 1 ? "" : "s")"
+            + (config.default != nil ? ", plus a default target." : ".")
+
+        let missing = missingTargetPaths(in: config)
+        if missing.isEmpty {
+            return ("Config is valid ✓",
+                    "JSONC parsed and the routing table is valid.\n\n\(summary)\n\nAll referenced apps were found on disk.",
+                    .informational)
+        }
+        let list = missing.map { "•  “\($0.name)” → \($0.path)" }.joined(separator: "\n")
+        return ("Config is valid, with warnings",
+                "JSONC parsed and the routing table is valid.\n\n\(summary)\n\n"
+                    + "⚠️ \(missing.count) referenced path\(missing.count == 1 ? "" : "s") not found on disk:\n\(list)\n\n"
+                    + "These targets will report “App not found” until the paths are corrected.",
+                .warning)
+    }
+
+    /// Every target whose primary app/exec/browser path does not exist on disk.
+    private static func missingTargetPaths(in config: RouterConfig) -> [(name: String, path: String)] {
+        var missing: [(name: String, path: String)] = []
+        func check(_ target: TargetConfig) {
+            if let path = TargetResolver.primaryExecutablePath(for: target),
+               !FileManager.default.fileExists(atPath: path) {
+                missing.append((target.name, path))
+            }
+        }
+        for targets in config.extensions.values { targets.forEach(check) }
+        for rule in config.urls { rule.targets.forEach(check) }
+        if let fallback = config.default { check(fallback) }
+        return missing
+    }
+
+    /// Modal alert for user-initiated actions (Validate Config). Activates the accessory
+    /// app first so the alert comes to the front.
+    private func presentAlert(title: String, body: String, style: NSAlert.Style) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = body
+        alert.alertStyle = style
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     /// Manual "Register as Default Handler…" menu action. Now config-driven (Update02): it

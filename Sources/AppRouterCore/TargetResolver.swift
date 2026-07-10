@@ -55,6 +55,22 @@ public enum TargetResolver {
         return systemArgv(input: input, bundleID: systemHandlerBundleID)
     }
 
+    /// The single filesystem path that must exist for this target to launch: the app
+    /// bundle, the executable/script, or the browser bundle. Returns `nil` for
+    /// `system: true` (which defers to whatever the OS default handler is — there is
+    /// nothing local to verify). The precedence mirrors `argv` so the checked path is the
+    /// one actually launched.
+    ///
+    /// Update03: lets the shell surface a clear "not found" error when a config path is
+    /// mistyped, instead of a silent `open` failure (a beep at best).
+    public static func primaryExecutablePath(for target: TargetConfig) -> String? {
+        if target.system == true { return nil }
+        if let browser = target.browser { return target.bin ?? browser }
+        if let exec = target.exec { return target.bin ?? exec }
+        if let app = target.app { return app }
+        return target.bin
+    }
+
     /// argv for deferring to the macOS default handler. With a recorded previous-handler
     /// bundle id, dispatch explicitly to it (`open -b`) so app-router never re-dispatches
     /// to itself; otherwise fall back to a bare `open`.
