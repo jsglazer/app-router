@@ -9,7 +9,8 @@ No settings GUI, no background bloat. The entire configuration is one hot-reload
 ## Features
 
 - **Extension routing** — map a file extension to one or more apps or shell executables.
-- **URL routing** — route URLs to a browser or a specific Chrome/Chromium profile using regex rules.
+- **URL routing** — route URLs to a browser or a specific Chrome/Chromium profile using regex rules. A plain browser target opens the URL in the **already-running** instance instead of spawning a fresh copy.
+- **Wildcard app paths** — a target's `app`/`exec`/`browser`/`bin` path may contain a glob (`*`, `?`, `[…]`), so an app whose bundle name embeds a fast-moving version — `texstudio-4.9.5-osx-m1.app` — keeps routing across updates via a pattern like `/Applications/texstudio-*.app`. The pattern is resolved against the filesystem at launch; if several matching versions are present, the most recently modified wins.
 - **Cursor popup selector** — appears only when two or more targets match; mouse, ↑/↓ navigation, and 1–9 direct selection, all handled locally (no Accessibility permission required).
 - **JSONC config** — comments allowed; validated and **hot-reloaded** on save.
 - **Atomic reloads** — a bad edit is rejected as a whole and the last-known-good config stays active, so a typo never breaks routing. The file watcher survives atomic/editor "save-as-replace" writes (vim, most editors) and coalesces a burst of save events into a single reload.
@@ -105,6 +106,10 @@ The config is JSONC (JSON with `//` and `/* */` comments). Comment delimiters in
     ],
     "sh": [
       { "name": "Run",          "exec": "/usr/local/bin/handle", "args": ["--verbose"] }
+    ],
+    "tex": [
+      // Wildcard survives version-stamped renames on every update.
+      { "name": "TeXstudio",    "app": "/Applications/texstudio-*.app" }
     ]
   },
 
@@ -131,11 +136,13 @@ A target names exactly one destination:
 | --- | --- | --- |
 | `app` | GUI application bundle | `open -a <app> <input>` |
 | `exec` (+ optional `args`) | shell executable / script | `<exec> <args…> <input>` |
-| `browser` | browser bundle | `open -a <browser> <input>` |
-| `browser` + `profile` | browser with a Chrome/Chromium profile | `<browser-binary> --profile-directory=<id> <input>` |
+| `browser` | browser bundle | `open -a <browser> <input>` — opens in the running instance |
+| `browser` + `profile` | Chromium browser with a specific profile | `<browser-binary> --profile-directory=<id> <input>` |
 | `system: true` | the macOS default handler | `open <input>`, or `open -b <previous-handler>` when app-router is itself the default (loop-safe) |
 
-Paths for `app`, `exec`, `browser`, and `bin` must be **absolute** (start with `/`); a relative path is rejected at validation time with a clear message rather than failing silently at launch. An absolute path that doesn't exist on disk (a typo) is caught too — **Validate Config…** lists it up front, and opening a file that routes to it surfaces a clear "App not found" error instead of a silent failure.
+The `--profile-directory` launch is **Chromium-only** — it applies to Chrome, Chromium, Edge, Brave, and the like, which understand the flag and coordinate a direct binary launch into their single running instance. Non-Chromium browsers (Safari, Firefox) ignore the flag and don't coordinate a direct launch, so a `profile` on such a target is ignored and it routes via `open -a` — opening the URL in the running browser rather than spawning a new copy each time.
+
+Paths for `app`, `exec`, `browser`, and `bin` must be **absolute** (start with `/`); a relative path is rejected at validation time with a clear message rather than failing silently at launch. Each path may contain a shell glob (`*`, `?`, `[…]`) — handy for version-stamped bundles like `/Applications/texstudio-*.app` — resolved to the real path on disk at launch (newest match wins if several are present). An absolute path that doesn't exist on disk (a typo, or a wildcard that matches nothing) is caught too — **Validate Config…** lists it up front, and opening a file that routes to it surfaces a clear "App not found" error instead of a silent failure.
 
 ### Routing policy
 
