@@ -31,13 +31,16 @@ public enum TargetResolver {
         }
 
         if let browser = target.browser {
-            if let profile = target.profile, !profile.isEmpty {
+            if let profile = target.profile, !profile.isEmpty,
+               supportsProfileDirectory(bundlePath: browser) {
                 // Chrome/Chromium profile selection requires launching the executable
                 // directly with --profile-directory=<id>.
                 let executable = target.bin ?? browserExecutablePath(forBundle: browser)
                 return [executable, "--profile-directory=\(profile)", input]
             }
-            // Plain browser: let `open` route to the bundle.
+            // Plain browser: let `open` route to the bundle. `open -a` reuses the already
+            // running instance instead of spawning a fresh copy — the correct path for
+            // Safari and any browser that ignores `--profile-directory` (Update04).
             return ["/usr/bin/open", "-a", browser, input]
         }
 
@@ -81,15 +84,37 @@ public enum TargetResolver {
         return ["/usr/bin/open", input]
     }
 
+    /// Whether launching this browser's binary directly with `--profile-directory=<id>` is
+    /// meaningful. Only Chromium-family browsers understand that flag *and* coordinate a
+    /// direct binary launch into the single running instance. Safari and Firefox do neither:
+    /// the flag is ignored and running the binary directly spawns a brand-new process every
+    /// time — which is exactly why routing a URL to Safari opened a fresh copy on each hit
+    /// (Update04). Those browsers fall through to `open -a`, which reuses the running app.
+    ///
+    /// Pure string check on the bundle name (no filesystem probing) so the core stays
+    /// deterministic. The denylist is conservative: unknown browsers keep the prior
+    /// direct-launch behaviour, so no Chromium variant loses profile support.
+    static func supportsProfileDirectory(bundlePath: String) -> Bool {
+        let name = bundleBaseName(bundlePath).lowercased()
+        let noProfileDirectory = ["safari", "firefox"]
+        return !noProfileDirectory.contains { name.contains($0) }
+    }
+
     /// Derives the CLI executable inside an app bundle from the bundle path, e.g.
     /// `/Applications/Google Chrome.app` → `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`.
     /// Pure string manipulation (no filesystem probing) to keep the core deterministic.
     static func browserExecutablePath(forBundle bundlePath: String) -> String {
         let trimmed = bundlePath.hasSuffix("/") ? String(bundlePath.dropLast()) : bundlePath
+        return "\(trimmed)/Contents/MacOS/\(bundleBaseName(bundlePath))"
+    }
+
+    /// The bundle's base name — last path component with any trailing `/` and `.app`
+    /// stripped (e.g. `/Applications/Safari.app/` → `Safari`). Pure string manipulation.
+    static func bundleBaseName(_ bundlePath: String) -> String {
+        let trimmed = bundlePath.hasSuffix("/") ? String(bundlePath.dropLast()) : bundlePath
         let lastComponent = trimmed.split(separator: "/").last.map(String.init) ?? trimmed
-        let baseName = lastComponent.hasSuffix(".app")
+        return lastComponent.hasSuffix(".app")
             ? String(lastComponent.dropLast(4))
             : lastComponent
-        return "\(trimmed)/Contents/MacOS/\(baseName)"
     }
 }

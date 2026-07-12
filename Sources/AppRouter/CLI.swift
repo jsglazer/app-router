@@ -91,7 +91,8 @@ public enum CLI {
     }
 
     private static func printTarget(_ target: TargetConfig, input: String, indent: String = "  ") {
-        let argv = TargetResolver.argv(for: target, input: input)
+        // Expand wildcards (Update04) so --route shows the concrete path that would launch.
+        let argv = TargetResolver.argv(for: TargetPathExpander.expand(target), input: input)
         print("\(indent)\(target.name)")
         print("\(indent)argv: \(argv)")
     }

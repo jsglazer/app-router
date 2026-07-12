@@ -168,7 +168,11 @@ public final class AppController: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func launch(_ target: TargetConfig, input: String) {
+    private func launch(_ rawTarget: TargetConfig, input: String) {
+        // Wildcard expansion (Update04): resolve any glob in the target's path fields to the
+        // real bundle on disk *before* the existence check and argv build, so a config like
+        // `/Applications/texstudio-*.app` keeps working across version-stamped renames.
+        let target = TargetPathExpander.expand(rawTarget)
         // App-not-found error (Update03): surface a mistyped/missing path as a clear
         // message instead of a silent `open` failure. A `system` target has no local path
         // to verify (nil), so it is never blocked here.
@@ -332,7 +336,10 @@ public final class AppController: NSObject, NSApplicationDelegate {
     private static func missingTargetPaths(in config: RouterConfig) -> [(name: String, path: String)] {
         var missing: [(name: String, path: String)] = []
         func check(_ target: TargetConfig) {
-            if let path = TargetResolver.primaryExecutablePath(for: target),
+            // Expand wildcards first (Update04) so a pattern that *does* resolve to a real
+            // bundle isn't falsely reported as missing.
+            let resolved = TargetPathExpander.expand(target)
+            if let path = TargetResolver.primaryExecutablePath(for: resolved),
                !FileManager.default.fileExists(atPath: path) {
                 missing.append((target.name, path))
             }

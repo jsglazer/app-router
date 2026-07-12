@@ -55,6 +55,31 @@ import Testing
         #expect(argv == ["/custom/chromium", "--profile-directory=Default", "https://a.com"])
     }
 
+    // Update04: Safari doesn't understand `--profile-directory` and launching its binary
+    // directly spawns a fresh copy on every URL. A profile on a Safari target must be
+    // ignored and routed via `open -a`, which reuses the running instance.
+    @Test func safariWithProfileIgnoresProfileAndUsesOpenDashA() {
+        let safari = "/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app/"
+        let t = TargetConfig(name: "Safari", browser: safari, profile: "default")
+        let argv = TargetResolver.argv(for: t, input: "https://a.com")
+        #expect(argv == ["/usr/bin/open", "-a", safari, "https://a.com"])
+        // Never the direct-binary shape that duplicates Safari.
+        #expect(!argv.contains("--profile-directory=default"))
+    }
+
+    @Test func firefoxWithProfileAlsoUsesOpenDashA() {
+        let t = TargetConfig(name: "Firefox", browser: "/Applications/Firefox.app", profile: "dev")
+        let argv = TargetResolver.argv(for: t, input: "https://a.com")
+        #expect(argv == ["/usr/bin/open", "-a", "/Applications/Firefox.app", "https://a.com"])
+    }
+
+    // A Chromium-family browser keeps the direct `--profile-directory` launch.
+    @Test func chromeStillUsesProfileDirectoryLaunch() {
+        #expect(TargetResolver.supportsProfileDirectory(bundlePath: "/Applications/Google Chrome.app"))
+        #expect(!TargetResolver.supportsProfileDirectory(bundlePath: "/Applications/Safari.app/"))
+        #expect(!TargetResolver.supportsProfileDirectory(bundlePath: "/Applications/Firefox.app"))
+    }
+
     @Test func execTargetPassesArgsThenInput() {
         let t = TargetConfig(name: "Script", exec: "/usr/local/bin/handle", args: ["--flag", "value"])
         let argv = TargetResolver.argv(for: t, input: "/x/note.md")
