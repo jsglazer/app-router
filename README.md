@@ -39,6 +39,28 @@ That's it — a real `.app` bundle is what lets macOS deliver Finder/browser ope
 
 > The released DMG is signed with a Developer ID and notarized, so it opens with a normal double-click. A locally built, ad-hoc-signed DMG will prompt Gatekeeper on first launch — right-click the app ▸ **Open** once to approve it.
 
+### Setting up on another Mac
+
+The DMG is self-contained — no repo, toolchain, or Apple Developer account needed on the target machine.
+
+1. Install and launch as above. On first launch app-router writes a starter config to `~/.config/app-router/config.jsonc` (it never uses `~/Library/Application Support`).
+2. Edit that file to match *that* Mac. The config references apps by absolute path, so any app that lives somewhere else — or isn't installed there at all — must be fixed up or removed:
+
+   ```sh
+   open -e "$HOME/.config/app-router/config.jsonc"
+   ```
+
+   Save; the app validates and hot-reloads immediately. `app-router --validate` reports problems without launching the UI.
+3. To reuse your main Mac's routing table, copy the whole config over rather than retyping it, then correct any paths:
+
+   ```sh
+   scp ~/.config/app-router/config.jsonc othermac:.config/app-router/config.jsonc
+   ```
+
+4. Approve the handler prompts. Registration is per-machine LaunchServices state, so macOS asks again on the new Mac the first time each type is claimed.
+
+Extensions declared in the app's `Info.plist` travel inside the bundle, so `plistaddreg.py` and `reregister.sh` are only needed on the Mac you *build* on — a new extension reaches the other Macs with the next release.
+
 ## Build from source
 
 Requires the Swift 6 toolchain (Xcode 16+).

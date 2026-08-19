@@ -115,6 +115,18 @@ rm -f "$DMG"
 hdiutil create -volname "$APP_NAME $VERSION" \
     -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
 rm -rf "$STAGE"
+[ -f "$DMG" ] || { echo "hdiutil produced no DMG at $DMG" >&2; exit 1; }
+
+# 5b. Sign the disk image itself. hdiutil emits an *unsigned* image, so without this the
+#     app inside is notarized but the container assesses as
+#     "rejected / source=no usable signature" — Apple's distribution flow signs the image
+#     before notarizing it. Must run before step 6 (a signature invalidates a stapled
+#     ticket, so sign first, notarize second).
+if [ "$SIGNED_REAL" = 1 ]; then
+    echo "==> signing the DMG: $SIGN_IDENTITY"
+    codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG"
+    codesign --verify --strict --verbose=2 "$DMG"
+fi
 
 # 6. Notarize + staple the DMG itself. The app inside is already notarized+stapled
 #    (step 4), so the extracted app validates offline; notarizing the DMG (its own
@@ -125,6 +137,12 @@ if [ "$NOTARIZED" = 1 ]; then
     xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
     xcrun stapler staple "$DMG"
 fi
+
+# 7. Gatekeeper assessment — what another Mac will actually do with these artifacts.
+echo
+echo "==> Gatekeeper assessment"
+spctl -a -vvv -t exec "$APP" 2>&1 | sed 's/^/    app  /' || true
+spctl -a -vvv -t open --context context:primary-signature "$DMG" 2>&1 | sed 's/^/    dmg  /' || true
 
 echo
 echo "==> DONE"
