@@ -85,7 +85,6 @@ fi
 codesign --verify --strict --verbose=2 "$APP"
 
 # 4. Notarize — only when Developer-ID-signed and a notary profile exists.
-NOTARY_PROFILE="${NOTARY_PROFILE:-app-router-notary}"
 NOTARIZED=0
 # Authoritatively test the profile via notarytool itself — recent Xcode stores the
 # credential where `security find-generic-password` can't reliably see it, so probe
@@ -93,8 +92,26 @@ NOTARIZED=0
 have_profile() {
     xcrun notarytool history --keychain-profile "$1" >/dev/null 2>&1
 }
+# Use the pinned profile, else the first one that works: the app-specific profile, then
+# the shared `notarytool` profile used by the other apps. 1.0.7 shipped un-notarized
+# because the app-specific profile had vanished and the old code silently skipped.
+if [ -z "${NOTARY_PROFILE:-}" ]; then
+    for candidate in app-router-notary notarytool; do
+        if have_profile "$candidate"; then NOTARY_PROFILE="$candidate"; break; fi
+    done
+fi
+# A Developer-ID build that can't be notarized is a broken release artifact (Gatekeeper
+# blocks it on every other Mac), so fail loudly instead of quietly shipping it. Opt out
+# explicitly with SKIP_NOTARIZE=1 for a local-only build.
 if [ "$SIGNED_REAL" = 1 ] && [ -z "${SKIP_NOTARIZE:-}" ] \
-   && [ -n "$NOTARY_PROFILE" ] && have_profile "$NOTARY_PROFILE"; then
+   && { [ -z "${NOTARY_PROFILE:-}" ] || ! have_profile "$NOTARY_PROFILE"; }; then
+    echo "error: Developer ID build but no usable notarytool profile" \
+         "(tried: ${NOTARY_PROFILE:-app-router-notary notarytool})." >&2
+    echo "       Create one:  xcrun notarytool store-credentials app-router-notary" >&2
+    echo "       or build locally without notarizing:  SKIP_NOTARIZE=1 $0" >&2
+    exit 1
+fi
+if [ "$SIGNED_REAL" = 1 ] && [ -z "${SKIP_NOTARIZE:-}" ]; then
     echo "==> notarizing via profile '$NOTARY_PROFILE' (submits to Apple, waits)"
     ZIP="$DIST/$APP_NAME-notarize.zip"
     /usr/bin/ditto -c -k --keepParent "$APP" "$ZIP"
@@ -103,7 +120,7 @@ if [ "$SIGNED_REAL" = 1 ] && [ -z "${SKIP_NOTARIZE:-}" ] \
     rm -f "$ZIP"
     NOTARIZED=1
 elif [ "$SIGNED_REAL" = 1 ]; then
-    echo "==> skipping notarization (no notary profile '$NOTARY_PROFILE')"
+    echo "==> skipping notarization (SKIP_NOTARIZE set)"
 fi
 
 # 5. Build the drag-to-Applications DMG.
@@ -143,6 +160,11 @@ echo
 echo "==> Gatekeeper assessment"
 spctl -a -vvv -t exec "$APP" 2>&1 | sed 's/^/    app  /' || true
 spctl -a -vvv -t open --context context:primary-signature "$DMG" 2>&1 | sed 's/^/    dmg  /' || true
+if [ "$NOTARIZED" = 1 ] \
+   && ! spctl -a -t open --context context:primary-signature "$DMG" >/dev/null 2>&1; then
+    echo "error: notarized DMG still fails Gatekeeper assessment: $DMG" >&2
+    exit 1
+fi
 
 echo
 echo "==> DONE"

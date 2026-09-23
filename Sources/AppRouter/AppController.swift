@@ -105,8 +105,11 @@ public final class AppController: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "Validate Config…", action: #selector(validateConfig), keyEquivalent: "")
         menu.addItem(withTitle: "Register as Default Handler…", action: #selector(registerDefaults), keyEquivalent: "")
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.items.forEach { $0.target = self }
+        // Quit targets NSApp, not self: AppController doesn't implement terminate(_:), so
+        // targeting self left the item permanently disabled (greyed out).
+        let quit = menu.addItem(withTitle: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.target = NSApp
         item.menu = menu
         statusItem = item
         statusMenuItem = status
