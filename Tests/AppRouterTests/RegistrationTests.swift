@@ -139,14 +139,31 @@ private final class MemoryStateStore: HandlerStateStore, @unchecked Sendable {
         #expect(result.unsupported == ["png"])
     }
 
-    @Test func refusesOverBroadUTIEvenIfDeclared() async {
-        // .txt → public.plain-text: an over-broad supertype. Even if somehow declared, it
-        // must never be claimed (this was the root of the focus-stealing over-capture).
-        let registry = MockRegistry()
+    @Test func registersPlainTextWhenConfigRoutesTxt() async {
+        // .txt → public.plain-text: claimed only because the config routes txt and the
+        // type is declared in Info.plist.
+        let registry = MockRegistry(currentUTI: ["public.plain-text": "com.apple.TextEdit"])
         let state = MemoryStateStore()
         let controller = makeController(
             registry: registry, stateStore: state, selfID: "self",
             declaredUTIs: ["public.plain-text", "public.json"]
+        )
+
+        let result = await controller.reconcileHandlers(for: config(extensions: ["txt"]))
+
+        #expect(registry.setUTIs == ["public.plain-text"])
+        #expect(result.unsupported.isEmpty)
+        #expect(state.state.utis["public.plain-text"] == "com.apple.TextEdit")
+    }
+
+    @Test func refusesOverBroadUTIEvenIfDeclared() async {
+        // .txt must never be claimed through a supertype such as public.text, even if one
+        // is declared: only the extension's own concrete type counts.
+        let registry = MockRegistry()
+        let state = MemoryStateStore()
+        let controller = makeController(
+            registry: registry, stateStore: state, selfID: "self",
+            declaredUTIs: ["public.text", "public.json"]
         )
 
         let result = await controller.reconcileHandlers(for: config(extensions: ["txt"]))

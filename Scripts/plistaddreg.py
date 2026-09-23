@@ -19,6 +19,14 @@ export its own UTI — "com.jsglazer.app-router.<ext>" tagged to that filename
 extension — under UTExportedTypeDeclarations, the Apple-sanctioned way to claim
 an otherwise-undeclared type.
 
+Portability to other Macs: a real UTI on THIS Mac may come from a third-party
+app rather than macOS itself (e.g. org.tug.tex is defined by TeXShop). On a Mac
+without that app the extension would be dynamic and app-router would call it
+unsupported. So any resolved UTI that macOS's own CoreTypes bundle does not
+define is also declared under UTImportedTypeDeclarations (with its extension and
+public.* parent types), which makes the type exist wherever app-router is
+installed.
+
 Why this matters: the app computes a file's type with UTType(filenameExtension:)
 and only registers as default if its Info.plist declares THAT exact UTI. A
 bespoke UTI declared for an extension macOS already owns (like .css) is silently
@@ -67,7 +75,7 @@ UTI_PREFIX = "com.jsglazer.app-router"
 # will reject as unsupported.
 OVERBROAD_UTIS = {
     "public.item", "public.content", "public.composite-content",
-    "public.data", "public.text", "public.plain-text",
+    "public.data", "public.text",
     "public.source-code", "public.script", "public.executable",
 }
 
@@ -88,21 +96,66 @@ SYSTEM_UTI_EXTS = {
     "pdf": "com.adobe.pdf",
     "svg": "public.svg-image",
     "rtf": "public.rtf",
+    "txt": "public.plain-text",
+    "sh": "public.shell-script",
 }
+
+# Where macOS defines its own (Apple-owned) UTIs. A UTI declared anywhere else
+# belongs to a third-party app and must be imported to be portable.
+CORETYPES = "/System/Library/CoreServices/CoreTypes.bundle"
 
 TAB = "\t"
 
 # Swift program that prints, per extension, the UTI the app would resolve at
 # runtime and whether it is dynamic (i.e. macOS has no real system type for it).
-# Output is one tab-separated line per ext: "<ext>\t<identifier>\t<isDynamic>".
+# Output is one tab-separated line per (ext, candidate type), the preferred type
+# first: "<ext>\t<identifier>\t<isDynamic>\t<comma-joined public.* supertypes>".
+# The other candidates matter because which type a file gets can differ between
+# Macs (e.g. .md is public.markdown or net.daringfireball.markdown).
 _SWIFT_RESOLVER = (
     "import UniformTypeIdentifiers\n"
+    "func row(_ e: String, _ t: UTType) {\n"
+    "    let sup = t.supertypes.map(\\.identifier).filter { $0.hasPrefix(\"public.\") }.sorted().joined(separator: \",\")\n"
+    "    print(\"\\(e)\\t\\(t.identifier)\\t\\(t.isDynamic)\\t\\(sup)\")\n"
+    "}\n"
     "for e in CommandLine.arguments.dropFirst() {\n"
-    "    if let t = UTType(filenameExtension: e) {\n"
-    "        print(\"\\(e)\\t\\(t.identifier)\\t\\(t.isDynamic)\")\n"
-    "    } else { print(\"\\(e)\\tNONE\\ttrue\") }\n"
+    "    guard let t = UTType(filenameExtension: e) else { print(\"\\(e)\\tNONE\\ttrue\\t\"); continue }\n"
+    "    row(e, t)\n"
+    "    for o in UTType.types(tag: e, tagClass: .filenameExtension, conformingTo: nil) where o != t { row(e, o) }\n"
     "}\n"
 )
+
+
+# public.* parents recorded per resolved UTI by resolve_system_utis(), used when
+# writing an imported type declaration.
+SUPERTYPES = {}
+
+# Additional public.* types macOS (or an installed app) also maps to an ext,
+# besides the preferred one — declared too so the app catches whichever one a
+# given Mac assigns. Filled by resolve_system_utis().
+EXTRA_UTIS = {}
+
+
+def apple_defined_utis():
+    """Every UTI macOS itself defines (CoreTypes.bundle and its nested bundles)."""
+    utis = set()
+    plists = [os.path.join(CORETYPES, "Contents", "Info.plist")]
+    lib = os.path.join(CORETYPES, "Contents", "Library")
+    if os.path.isdir(lib):
+        for name in os.listdir(lib):
+            plists.append(os.path.join(lib, name, "Contents", "Info.plist"))
+    for path in plists:
+        try:
+            with open(path, "rb") as fh:
+                data = plistlib.load(fh)
+        except Exception:
+            continue
+        for key in ("UTExportedTypeDeclarations", "UTImportedTypeDeclarations"):
+            for entry in data.get(key, []):
+                ident = entry.get("UTTypeIdentifier")
+                if ident:
+                    utis.add(ident)
+    return utis
 
 
 def resolve_system_utis(exts):
@@ -128,11 +181,17 @@ def resolve_system_utis(exts):
                 result = {}
                 for line in proc.stdout.splitlines():
                     parts = line.split("\t")
-                    if len(parts) != 3:
+                    if len(parts) != 4:
                         continue
-                    ext, ident, is_dynamic = parts
-                    result[ext] = (None if is_dynamic == "true"
-                                   or ident == "NONE" else ident)
+                    ext, ident, is_dynamic, sup = parts
+                    real = is_dynamic != "true" and ident != "NONE"
+                    if real:
+                        SUPERTYPES[ident] = [x for x in sup.split(",") if x]
+                    if ext not in result:
+                        result[ext] = ident if real else None
+                    elif real and ident.startswith("public.") \
+                            and ident not in OVERBROAD_UTIS:
+                        EXTRA_UTIS.setdefault(ext, []).append(ident)
                 # Ensure every requested ext has an entry even if Swift skipped it.
                 for ext in exts:
                     result.setdefault(ext, None)
@@ -245,6 +304,49 @@ def exported_type_block(ext, uti, name):
     )
 
 
+def imported_type_block(ext, uti, name, parents):
+    conforms = "".join(
+        f"{TAB}{TAB}{TAB}{TAB}<string>{p}</string>\n" for p in parents)
+    return (
+        f"{TAB}{TAB}<dict>\n"
+        f"{TAB}{TAB}{TAB}<key>UTTypeIdentifier</key>\n"
+        f"{TAB}{TAB}{TAB}<string>{uti}</string>\n"
+        f"{TAB}{TAB}{TAB}<key>UTTypeDescription</key>\n"
+        f"{TAB}{TAB}{TAB}<string>{name}</string>\n"
+        f"{TAB}{TAB}{TAB}<key>UTTypeConformsTo</key>\n"
+        f"{TAB}{TAB}{TAB}<array>\n"
+        f"{conforms}"
+        f"{TAB}{TAB}{TAB}</array>\n"
+        f"{TAB}{TAB}{TAB}<key>UTTypeTagSpecification</key>\n"
+        f"{TAB}{TAB}{TAB}<dict>\n"
+        f"{TAB}{TAB}{TAB}{TAB}<key>public.filename-extension</key>\n"
+        f"{TAB}{TAB}{TAB}{TAB}<array>\n"
+        f"{TAB}{TAB}{TAB}{TAB}{TAB}<string>{ext}</string>\n"
+        f"{TAB}{TAB}{TAB}{TAB}</array>\n"
+        f"{TAB}{TAB}{TAB}</dict>\n"
+        f"{TAB}{TAB}</dict>\n"
+    )
+
+
+def add_section_or_entries(text, key, blocks):
+    """Append blocks to the <array> under KEY, creating the section if absent."""
+    if not blocks:
+        return text
+    if f"<key>{key}</key>" in text:
+        span = array_span(text, key)
+        return insert_before_close(text, span[1], "".join(blocks))
+    new_section = (
+        f"{TAB}<key>{key}</key>\n"
+        f"{TAB}<array>\n"
+        f"{''.join(blocks)}"
+        f"{TAB}</array>\n"
+    )
+    # Insert before the closing </dict> of the root plist dictionary.
+    root_close = text.rfind("</dict>")
+    line_start = text.rfind("\n", 0, root_close) + 1
+    return text[:line_start] + new_section + text[line_start:]
+
+
 def existing_state(data):
     """Collect the UTIs already advertised and extensions already exported."""
     doc_utis = set()
@@ -256,7 +358,9 @@ def existing_state(data):
         tags = entry.get("UTTypeTagSpecification", {})
         for e in tags.get("public.filename-extension", []):
             exported_exts.add(e.lower())
-    return doc_utis, exported_exts
+    imported_utis = {entry.get("UTTypeIdentifier")
+                     for entry in data.get("UTImportedTypeDeclarations", [])}
+    return doc_utis, exported_exts, imported_utis
 
 
 def main(argv):
@@ -271,7 +375,8 @@ def main(argv):
         text = fh.read()
     data = plistlib.loads(text.encode("utf-8"))
 
-    doc_utis, exported_exts = existing_state(data)
+    doc_utis, exported_exts, imported_utis = existing_state(data)
+    apple_utis = apple_defined_utis()
 
     # Resolve the real system UTI for each ext the way the app does; a curated
     # map entry (if any) overrides the dynamic result.
@@ -279,6 +384,7 @@ def main(argv):
 
     doc_blocks = []          # new CFBundleDocumentTypes entries
     exported_blocks = []     # new UTExportedTypeDeclarations entries
+    imported_blocks = []     # new UTImportedTypeDeclarations entries
     added, skipped = [], []
 
     for ext in exts:
@@ -292,48 +398,56 @@ def main(argv):
             system_uti = None
 
         export = system_uti is None
-        uti = system_uti or f"{UTI_PREFIX}.{ext}"
         name = f"{ext.upper()} Document"
+        utis = [system_uti or f"{UTI_PREFIX}.{ext}"]
+        if not export:
+            utis += [u for u in EXTRA_UTIS.get(ext, []) if u not in utis]
 
-        if uti in doc_utis or (export and ext in exported_exts):
+        changed = False
+        for uti in utis:
+            # A real UTI that macOS itself doesn't define came from a third-party
+            # app on this Mac; import it so the type also exists on Macs without
+            # that app.
+            needs_import = (not export and apple_utis
+                            and not uti.startswith(UTI_PREFIX + ".")
+                            and uti not in apple_utis and uti not in imported_utis)
+
+            if (uti in doc_utis and not needs_import) or (export and ext in exported_exts):
+                continue
+
+            if uti not in doc_utis:
+                doc_blocks.append(doc_type_block(uti, name))
+                doc_utis.add(uti)
+            if export:
+                exported_blocks.append(exported_type_block(ext, uti, name))
+                exported_exts.add(ext)
+            kind = "exported UTI" if export else "system UTI"
+            if needs_import:
+                parents = SUPERTYPES.get(uti) or ["public.data", "public.content"]
+                imported_blocks.append(imported_type_block(ext, uti, name, parents))
+                imported_utis.add(uti)
+                kind = "imported UTI (third-party type, declared for portability)"
+            added.append((ext, uti, kind))
+            changed = True
+        if not changed:
             skipped.append(ext)
-            continue
 
-        doc_blocks.append(doc_type_block(uti, name))
-        doc_utis.add(uti)
-        if export:
-            exported_blocks.append(exported_type_block(ext, uti, name))
-            exported_exts.add(ext)
-        added.append((ext, uti, export))
-
-    if not doc_blocks:
+    if not doc_blocks and not imported_blocks:
         print("Nothing to do — all requested extensions are already registered:")
         for ext in skipped:
             print(f"  · .{ext}")
         return
 
     # 1) Insert new document-type dicts before the CFBundleDocumentTypes </array>.
-    span = array_span(text, "CFBundleDocumentTypes")
-    if span is None:
-        sys.exit("error: CFBundleDocumentTypes array not found in plist")
-    text = insert_before_close(text, span[1], "".join(doc_blocks))
+    if doc_blocks:
+        span = array_span(text, "CFBundleDocumentTypes")
+        if span is None:
+            sys.exit("error: CFBundleDocumentTypes array not found in plist")
+        text = insert_before_close(text, span[1], "".join(doc_blocks))
 
-    # 2) Insert / create UTExportedTypeDeclarations for the bespoke extensions.
-    if exported_blocks:
-        if "<key>UTExportedTypeDeclarations</key>" in text:
-            span = array_span(text, "UTExportedTypeDeclarations")
-            text = insert_before_close(text, span[1], "".join(exported_blocks))
-        else:
-            new_section = (
-                f"{TAB}<key>UTExportedTypeDeclarations</key>\n"
-                f"{TAB}<array>\n"
-                f"{''.join(exported_blocks)}"
-                f"{TAB}</array>\n"
-            )
-            # Insert before the closing </dict> of the root plist dictionary.
-            root_close = text.rfind("</dict>")
-            line_start = text.rfind("\n", 0, root_close) + 1
-            text = text[:line_start] + new_section + text[line_start:]
+    # 2) Insert / create the exported (bespoke) and imported (third-party) types.
+    text = add_section_or_entries(text, "UTExportedTypeDeclarations", exported_blocks)
+    text = add_section_or_entries(text, "UTImportedTypeDeclarations", imported_blocks)
 
     # Validate the result before touching disk; keep a backup either way.
     try:
@@ -347,8 +461,7 @@ def main(argv):
 
     print(f"Updated {PLIST}")
     print(f"(backup: {BACKUP})")
-    for ext, uti, export in added:
-        kind = "exported UTI" if export else "system UTI"
+    for ext, uti, kind in added:
         print(f"  + .{ext:<10} -> {uti}  ({kind})")
     for ext in skipped:
         print(f"  · .{ext:<10} already registered, skipped")

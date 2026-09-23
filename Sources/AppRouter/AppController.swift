@@ -254,8 +254,12 @@ public final class AppController: NSObject, NSApplicationDelegate {
             guard let scheme = Self.scheme(of: urlString) else { return nil }
             return state.schemes[scheme]
         case .file(_, let ext):
-            guard !ext.isEmpty, let type = UTType(filenameExtension: ext) else { return nil }
-            return state.utis[type.identifier]
+            guard let type = resolvedType(forExtension: ext) else { return nil }
+            // Walk up the conformance tree: a type app-router only owns via a supertype
+            // (e.g. a .log file caught through public.plain-text) falls back to the handler
+            // recorded for that supertype instead of tripping the C1 loop guard.
+            if let direct = state.utis[type.identifier] { return direct }
+            return type.supertypes.lazy.compactMap { state.utis[$0.identifier] }.first
         }
     }
 
@@ -268,9 +272,33 @@ public final class AppController: NSObject, NSApplicationDelegate {
             guard let scheme = Self.scheme(of: urlString) else { return false }
             return registry.currentDefaultHandler(forScheme: scheme) == selfID
         case .file(_, let ext):
-            guard !ext.isEmpty, let type = UTType(filenameExtension: ext) else { return false }
+            guard let type = resolvedType(forExtension: ext) else { return false }
             return registry.currentDefaultHandler(forUTI: type.identifier) == selfID
         }
+    }
+
+    /// The UTI app-router treats an extension as. More than one type can claim the same
+    /// extension (e.g. `.tex` is both `org.tug.tex` and TeXShop's `edu.uo.texshop.tex`),
+    /// and which one `UTType(filenameExtension:)` returns depends on the apps installed on
+    /// that Mac. Preferring a candidate app-router itself declares in Info.plist makes the
+    /// lookup give the same answer on every machine; otherwise the system's pick is used.
+    private func resolvedType(forExtension ext: String) -> UTType? {
+        let key = ext.lowercased()
+        guard !key.isEmpty else { return nil }
+        let declared = Set(declaredUTIsProvider())
+        let candidates = Self.candidateTypes(forExtension: key)
+        return candidates.first { declared.contains($0.identifier) } ?? candidates.first
+    }
+
+    /// Every type registered for `ext`, the system's preferred one first, without duplicates.
+    private static func candidateTypes(forExtension ext: String) -> [UTType] {
+        var result: [UTType] = []
+        if let preferred = UTType(filenameExtension: ext) { result.append(preferred) }
+        for type in UTType.types(tag: ext, tagClass: .filenameExtension, conformingTo: nil)
+            where !result.contains(type) {
+            result.append(type)
+        }
+        return result
     }
 
     private static func scheme(of urlString: String) -> String? {
@@ -405,9 +433,12 @@ public final class AppController: NSObject, NSApplicationDelegate {
     /// made app-router the handler for every text file (including its own config.jsonc) and
     /// fed the focus-stealing routing loop. This denylist enforces "config extensions,
     /// nothing else" defensively, independent of what Info.plist happens to declare.
+    /// `public.plain-text` is deliberately NOT listed: it is the concrete type of `.txt`,
+    /// claimed only when the config routes `txt`. Files that reach app-router through it
+    /// (e.g. `.log`) fall back to its recorded prior handler (see `recordedSystemHandler`).
     private static let overBroadUTIs: Set<String> = [
         "public.item", "public.content", "public.composite-content",
-        "public.data", "public.text", "public.plain-text",
+        "public.data", "public.text",
         "public.source-code", "public.script", "public.executable"
     ]
 
@@ -483,7 +514,9 @@ public final class AppController: NSObject, NSApplicationDelegate {
     }
 
     /// The UTIs app-router should own for `config`: each config extension resolved to its
-    /// system UTI, kept only when that UTI is build-time declared *and* not over-broad.
+    /// UTIs, kept only when build-time declared *and* not over-broad. Every type registered
+    /// for the extension is considered (not just the system's preferred one), so a declared
+    /// type still counts on a Mac where another app claims the same extension.
     /// Extensions that resolve to no UTI, an undeclared UTI, or an over-broad supertype are
     /// returned as `unsupported` so the shell can tell the user they need an app update.
     private func desiredUTIs(for config: RouterConfig) -> (utis: Set<String>, unsupported: [String]) {
@@ -492,13 +525,17 @@ public final class AppController: NSObject, NSApplicationDelegate {
         var unsupported: [String] = []
         for ext in config.extensions.keys {
             let key = ext.lowercased()
-            guard let uti = UTType(filenameExtension: key)?.identifier,
-                  !Self.overBroadUTIs.contains(uti),
-                  declared.contains(uti) else {
+            // Claim every declared type for the extension, not just one: which of them a
+            // given file actually gets (e.g. `.md` → public.markdown vs
+            // net.daringfireball.markdown) depends on the apps installed on that Mac.
+            let owned = Self.candidateTypes(forExtension: key)
+                .map(\.identifier)
+                .filter { declared.contains($0) && !Self.overBroadUTIs.contains($0) }
+            if owned.isEmpty {
                 unsupported.append(key)
                 continue
             }
-            utis.insert(uti)
+            utis.formUnion(owned)
         }
         return (utis, unsupported)
     }
