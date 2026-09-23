@@ -24,6 +24,9 @@ let configPath = guiConfigPath ?? ConfigBootstrap.defaultPath
 let bootstrap = ConfigBootstrap.makeStore(path: configPath)
 
 let app = NSApplication.shared
+// Only run from /Applications or ~/Applications — before any handler registration or
+// open-event delivery, so a dev/dist/backup copy can never become the active router.
+MainActor.assumeIsolated { InstallLocation.enforce() }
 let controller = AppController(
     store: bootstrap.store,
     configURL: URL(fileURLWithPath: configPath),

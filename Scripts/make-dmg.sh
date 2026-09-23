@@ -35,6 +35,8 @@ DIST="$ROOT/dist"
 APP="$DIST/$APP_NAME.app"
 DMG="$DIST/${APP_NAME}-${VERSION}.dmg"
 mkdir -p "$DIST"
+# Keep Spotlight out of dist/ so it doesn't re-register the build copy with LaunchServices.
+touch "$DIST/.metadata_never_index"
 
 echo "==> app-router packager (version $VERSION)"
 
@@ -165,6 +167,12 @@ if [ "$NOTARIZED" = 1 ] \
     echo "error: notarized DMG still fails Gatekeeper assessment: $DMG" >&2
     exit 1
 fi
+
+# 8. Unregister the build copy from LaunchServices. app-router refuses to run outside
+#    /Applications anyway (InstallLocation.swift), but an unregistered copy is never even
+#    offered as a default handler, so file/URL opens can't be routed to it.
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+    -u "$APP" 2>/dev/null || true
 
 echo
 echo "==> DONE"

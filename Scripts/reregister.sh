@@ -14,11 +14,14 @@
 #   Scripts/reregister.sh --quick      # skip swift rebuild; just refresh the
 #                                      #   bundle's Info.plist from source, then
 #                                      #   reinstall + re-register + relaunch
-#   Scripts/reregister.sh --dist       # register/run dist/app-router.app in place
-#                                      #   (don't copy into /Applications)
 #   Scripts/reregister.sh --rebuild-db # also force a full LaunchServices DB rebuild
 #
-# Flags may be combined, e.g.  Scripts/reregister.sh --quick --dist
+# Flags may be combined, e.g.  Scripts/reregister.sh --quick --rebuild-db
+#
+# app-router only runs from /Applications (or ~/Applications) — see InstallLocation.swift —
+# so there is no "run from dist/" mode. The dist/ copy is unregistered from LaunchServices
+# so macOS never picks it as a default handler. To test a dist build without installing:
+#   open --env APP_ROUTER_ALLOW_ANY_LOCATION=1 dist/app-router.app
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -32,13 +35,11 @@ INSTALL_APP="/Applications/$APP_NAME.app"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 QUICK=0        # --quick : skip the swift rebuild
-USE_DIST=0     # --dist  : register/run from dist/ instead of /Applications
 REBUILD_DB=0   # --rebuild-db : also kill+rebuild the whole LaunchServices DB
 
 for arg in "$@"; do
     case "$arg" in
         --quick)      QUICK=1 ;;
-        --dist)       USE_DIST=1 ;;
         --rebuild-db) REBUILD_DB=1 ;;
         -h|--help)    grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $arg" >&2; exit 2 ;;
@@ -56,15 +57,10 @@ else
 fi
 
 # 2. Decide which bundle we register/run, and install it there if needed.
-if [ "$USE_DIST" -eq 1 ]; then
-    TARGET_APP="$DIST_APP"
-    echo "▶ Step 2: Using dist bundle in place ($TARGET_APP)"
-else
-    TARGET_APP="$INSTALL_APP"
-    echo "▶ Step 2: Install the rebuilt app to /Applications..."
-    rm -rf "$TARGET_APP"
-    cp -R "$DIST_APP" "$TARGET_APP"
-fi
+TARGET_APP="$INSTALL_APP"
+echo "▶ Step 2: Install the rebuilt app to /Applications..."
+rm -rf "$TARGET_APP"
+cp -R "$DIST_APP" "$TARGET_APP"
 
 # 3. Quit any running instance (menu-bar helper, LSUIElement).
 echo "▶ Step 3: Quit the running instance..."
@@ -74,6 +70,8 @@ sleep 1
 # 4. Re-register the target bundle so LaunchServices re-reads its declared types.
 echo "▶ Step 4: Re-register with LaunchServices..."
 "$LSREGISTER" -f "$TARGET_APP"
+# Make sure the build copy can't be picked as a handler (make-dmg.sh does this too).
+"$LSREGISTER" -u "$DIST_APP" 2>/dev/null || true
 
 if [ "$REBUILD_DB" -eq 1 ]; then
     echo "▶ Step 4b: Forcing full LaunchServices database rebuild..."
