@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import UniformTypeIdentifiers
 @testable import AppRouter
 @testable import AppRouterCore
 
@@ -201,5 +202,47 @@ private final class MemoryStateStore: HandlerStateStore, @unchecked Sendable {
         #expect(result.failed == 1)
         #expect(result.registered == 1)
         #expect(registry.setUTIs == [htmlUTI])
+        #expect(result.failedTypes == [jsonUTI])
+    }
+
+    @Test func extensionsDifferingOnlyByCaseAreReportedOnce() async {
+        let controller = makeController(registry: MockRegistry(), stateStore: MemoryStateStore(), selfID: "self")
+
+        let result = await controller.reconcileHandlers(for: config(extensions: ["PNG", "png"]))
+
+        #expect(result.unsupported == ["png"])
+    }
+
+    /// `.md` has two declared types here; which one is preferred varies by Mac, so the test
+    /// asks the system rather than hard-coding it.
+    @Test func onlyFailingThePreferredTypeCountsAsAFailure() async throws {
+        let declared = ["public.markdown", "net.daringfireball.markdown"]
+        let preferred = try #require(UTType(filenameExtension: "md")?.identifier)
+        try #require(declared.contains(preferred))
+        let secondary = try #require(declared.first { $0 != preferred })
+
+        let failsSecondary = MockRegistry(failUTIs: [secondary])
+        let a = await makeController(registry: failsSecondary, stateStore: MemoryStateStore(), selfID: "self", declaredUTIs: declared)
+            .reconcileHandlers(for: config(extensions: ["md"]))
+        #expect(a.failed == 0)
+        #expect(a.failedTypes.isEmpty)
+        #expect(failsSecondary.setUTIs == [preferred])
+
+        let failsPreferred = MockRegistry(failUTIs: [preferred])
+        let b = await makeController(registry: failsPreferred, stateStore: MemoryStateStore(), selfID: "self", declaredUTIs: declared)
+            .reconcileHandlers(for: config(extensions: ["md"]))
+        #expect(b.failedTypes == [preferred])
+    }
+
+    @Test func cleanReconcileHasNoStatusMessage() {
+        #expect(AppController.handlerStatusMessage(failedTypes: [], unsupported: []) == nil)
+    }
+
+    /// A failure must not hide unregisterable extensions, and both must be named.
+    @Test func statusMessageReportsFailuresAndUnsupportedTogether() throws {
+        let message = try #require(AppController.handlerStatusMessage(failedTypes: ["public.markdown"], unsupported: ["tab", "rout"]))
+
+        #expect(message.contains("1 handler change(s) failed or were denied: public.markdown"))
+        #expect(message.contains(".rout, .tab"))
     }
 }

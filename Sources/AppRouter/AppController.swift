@@ -405,8 +405,8 @@ public final class AppController: NSObject, NSApplicationDelegate {
                     + result.unsupported.sorted().map { ".\($0)" }.joined(separator: ", ") + "."
             }
             Log.registration.notice("registration complete — \(summary, privacy: .public)")
-            showStatus(result.failed > 0 ? "\(result.failed) handler change(s) failed or were denied." : nil,
-                       isError: result.failed > 0)
+            let status = Self.handlerStatusMessage(failedTypes: result.failedTypes, unsupported: result.unsupported)
+            showStatus(status, isError: status != nil)
             presentInfo("Default handler registration", body: summary)
         }
     }
@@ -419,14 +419,24 @@ public final class AppController: NSObject, NSApplicationDelegate {
         if result.registered > 0 || result.restored > 0 {
             Log.registration.notice("auto-reconcile — registered \(result.registered, privacy: .public), restored \(result.restored, privacy: .public)")
         }
-        if result.failed > 0 {
-            showStatus("\(result.failed) handler change(s) failed or were denied.", isError: true)
-        } else if !result.unsupported.isEmpty {
-            let list = result.unsupported.sorted().map { ".\($0)" }.joined(separator: ", ")
-            showStatus("Not registerable (not in built-in type set): \(list)", isError: true)
-        } else {
-            showStatus(nil, isError: false)
+        let status = Self.handlerStatusMessage(failedTypes: result.failedTypes, unsupported: result.unsupported)
+        showStatus(status, isError: status != nil)
+    }
+
+    /// The menu-bar text for a reconcile, or `nil` when it was clean. Reports failures and
+    /// unregisterable extensions together, naming each one: showing only the failure count
+    /// hid the fact that a config extension was never declared, which is the actionable part.
+    static func handlerStatusMessage(failedTypes: [String], unsupported: [String]) -> String? {
+        var parts: [String] = []
+        if !failedTypes.isEmpty {
+            parts.append("\(failedTypes.count) handler change(s) failed or were denied: "
+                + failedTypes.sorted().joined(separator: ", "))
         }
+        if !unsupported.isEmpty {
+            parts.append("Not registerable (not in built-in type set): "
+                + unsupported.sorted().map { ".\($0)" }.joined(separator: ", "))
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     // MARK: - Config-driven handler reconciliation (Update02)
@@ -452,12 +462,13 @@ public final class AppController: NSObject, NSApplicationDelegate {
     /// app-router. Returns counts plus the config extensions that can't be registered
     /// because they're outside the build-time declared set.
     @discardableResult
-    func reconcileHandlers(for config: RouterConfig) async -> (registered: Int, restored: Int, failed: Int, unsupported: [String]) {
+    func reconcileHandlers(for config: RouterConfig) async -> (registered: Int, restored: Int, failed: Int, failedTypes: [String], unsupported: [String]) {
         let selfID = selfBundleID
         var state = stateStore.load()
-        let (wantUTIs, unsupported) = desiredUTIs(for: config)
+        let (wantUTIs, primaryUTIs, unsupported) = desiredUTIs(for: config)
         let wantSchemes = desiredSchemes(for: config)
-        var registered = 0, restored = 0, failed = 0
+        var registered = 0, restored = 0
+        var failedTypes: [String] = []
 
         // Take over newly-desired UTIs we don't already own.
         for uti in wantUTIs {
@@ -467,9 +478,14 @@ public final class AppController: NSObject, NSApplicationDelegate {
             do {
                 try await registry.setDefaultHandler(forUTI: uti)
                 registered += 1
-            } catch {
-                failed += 1
+            } catch where primaryUTIs.contains(uti) {
+                failedTypes.append(uti)
                 Log.registration.error("UTI \(uti, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            } catch {
+                // A secondary type (e.g. public.markdown where .md files resolve to
+                // net.daringfireball.markdown): this extension's files still route, so
+                // there is nothing for the user to act on.
+                Log.registration.notice("secondary UTI \(uti, privacy: .public) not claimed: \(error.localizedDescription, privacy: .public)")
             }
         }
         // Relinquish UTIs we own but the config no longer references.
@@ -479,7 +495,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
                     try await registry.restoreDefaultHandler(forUTI: uti, toBundleID: previous)
                     restored += 1
                 } catch {
-                    failed += 1
+                    failedTypes.append(uti)
                     Log.registration.error("restore UTI \(uti, privacy: .public) → \(previous, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
                 }
             }
@@ -494,7 +510,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 try await registry.setDefaultHandler(forScheme: scheme)
                 registered += 1
             } catch {
-                failed += 1
+                failedTypes.append(scheme)
                 Log.registration.error("scheme \(scheme, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
             }
         }
@@ -505,7 +521,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
                     try await registry.restoreDefaultHandler(forScheme: scheme, toBundleID: previous)
                     restored += 1
                 } catch {
-                    failed += 1
+                    failedTypes.append(scheme)
                     Log.registration.error("restore scheme \(scheme, privacy: .public) → \(previous, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
                 }
             }
@@ -513,7 +529,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
         }
 
         stateStore.save(state)
-        return (registered, restored, failed, unsupported)
+        return (registered, restored, failedTypes.count, failedTypes, unsupported)
     }
 
     /// The UTIs app-router should own for `config`: each config extension resolved to its
@@ -522,10 +538,16 @@ public final class AppController: NSObject, NSApplicationDelegate {
     /// type still counts on a Mac where another app claims the same extension.
     /// Extensions that resolve to no UTI, an undeclared UTI, or an over-broad supertype are
     /// returned as `unsupported` so the shell can tell the user they need an app update.
-    private func desiredUTIs(for config: RouterConfig) -> (utis: Set<String>, unsupported: [String]) {
+    /// `primary` holds each extension's first owned type — the system's preferred one when
+    /// declared, so the type its files actually get. Only a failure to claim one of these
+    /// means an extension won't route.
+    private func desiredUTIs(for config: RouterConfig) -> (utis: Set<String>, primary: Set<String>, unsupported: [String]) {
         let declared = Set(declaredUTIsProvider())
         var utis = Set<String>()
-        var unsupported: [String] = []
+        var primary = Set<String>()
+        // A Set because config keys are case-sensitive but extensions aren't: "R" and "r"
+        // are one extension and must be reported once.
+        var unsupported = Set<String>()
         for ext in config.extensions.keys {
             let key = ext.lowercased()
             // Claim every declared type for the extension, not just one: which of them a
@@ -534,13 +556,14 @@ public final class AppController: NSObject, NSApplicationDelegate {
             let owned = Self.candidateTypes(forExtension: key)
                 .map(\.identifier)
                 .filter { declared.contains($0) && !Self.overBroadUTIs.contains($0) }
-            if owned.isEmpty {
-                unsupported.append(key)
+            guard let first = owned.first else {
+                unsupported.insert(key)
                 continue
             }
+            primary.insert(first)
             utis.formUnion(owned)
         }
-        return (utis, unsupported)
+        return (utis, primary, unsupported.sorted())
     }
 
     /// The URL schemes app-router should own for `config`: the declared schemes, but only
