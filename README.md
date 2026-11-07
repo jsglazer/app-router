@@ -1,6 +1,6 @@
 # app-router
 
-[![Release](https://img.shields.io/github/v/release/jsglazer/app-router)](https://github.com/jsglazer/app-router/releases/latest) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![GitHub release](https://img.shields.io/github/v/release/jsglazer/app-router?logo=github)](https://github.com/jsglazer/app-router/releases) [![Swift 6.0](https://img.shields.io/badge/Swift-6.0-F05138?logo=swift&logoColor=white)](https://swift.org) [![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/jsglazer/app-router/blob/main/LICENSE) [![Made with Claude](https://img.shields.io/badge/Made_with-Claude-D97756?logo=anthropic)](https://claude.ai) [![Gemini Flash Antigravity](https://img.shields.io/badge/Gemini%20Flash-Antigravity-4f86f7?logo=google-gemini&logoColor=white)](https://github.com/google-gemini)
 
 A lightweight, local-first macOS router for files and URLs — a slim alternative to OpenIn 4. When you open a file or a link, app-router picks the destination from a single JSONC config: a specific app for a file extension, or a specific browser (and Chrome profile) for a URL. When more than one destination matches, it shows a cursor-aligned popup you can drive with the mouse, the arrow keys, or number keys.
 
@@ -174,14 +174,15 @@ Paths for `app`, `exec`, `browser`, and `bin` must be **absolute** (start with `
 
 ### Handled types & default-handler registration
 
-macOS Launch Services cannot make an app the default handler for a type it did not declare at build time. app-router declares a **curated set of specific document types** (Markdown, JSON, YAML, XML, HTML, CSV, PDF, SVG, RTF) and URL schemes (`http`/`https`) in its `Info.plist` — never an over-broad supertype like `public.plain-text`, which would silently make it a handler for *every* text file.
+macOS Launch Services cannot make an app the default handler for a type it did not declare at build time. app-router declares a **curated set of specific document types** (Markdown, JSON, JSONC, YAML, XML, HTML, CSV, TAB, PDF, SVG, RTF, CSS, Python, shell, plain text, TeX, R, Rout) and URL schemes (`http`/`https`) in its `Info.plist` — never an over-broad supertype like `public.text` or `public.data`, which would silently make it a handler for far more than your config names. Plain text (`public.plain-text`) is claimed only when the config routes `txt`; other files that reach app-router through that type, such as `.log`, go back to the prior plain-text handler when the config has no rule for them.
 
 Registration is **config-driven and automatic**. On launch and on every config save, app-router reconciles the OS default handlers to your config:
 
 - Each file extension in `extensions` is resolved to its system UTI. If that UTI is in the declared set, app-router registers itself as the default handler for it (recording the handler that owned it before, so a `system: true` fallback can dispatch back without looping).
 - When URL rules are present, app-router claims the `http`/`https` handler role; with no URL rules, it leaves the browser role alone.
 - Removing an extension (or all URL rules) and saving **hands the type back** to its recorded prior handler — app-router doesn't remain a stale default.
-- An extension whose type isn't in the curated set can't be registered; app-router flags it in the menu-bar state rather than silently doing nothing. Supporting a genuinely new type means adding its UTI to `Info.plist` and rebuilding.
+- An extension whose type isn't in the curated set can't be registered; the menu-bar status lists it by name rather than silently doing nothing. To support a new extension, run `Scripts/plistaddreg.py <ext>`, then `Scripts/reregister.sh` to rebuild, reinstall and re-register.
+- If macOS refuses or you deny a change, the menu-bar status names the type, alongside any extensions that can't be registered. Only the type an extension's files actually get counts as a failure: when several types share an extension (`.md` is `net.daringfireball.markdown` or `public.markdown`, depending on the Mac), a refusal on the unused one is only logged.
 
 macOS prompts you to approve each *new* type once; types already pointing at app-router are skipped, so a save that adds nothing new prompts for nothing. The **Register as Default Handler…** menu item re-runs the same reconciliation on demand. (Registration works out of the box when you install the `.app` from the DMG — see [Install](#install).)
 
