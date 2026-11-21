@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """plistaddreg.py — register additional file extensions with app-router.
 
+OPTIONAL since 1.0.11: Info.plist declares a catch-all public.data document type (LSHandlerRank None), so app-router can become the default for any config extension — including dynamic dyn.* types — without this script or a rebuild. Use it only to declare a specific named type, e.g. to make one of several competing UTIs for an extension count on every Mac.
+
 Adds the declarations needed for LaunchServices to let app-router become the
 default handler for one or more file extensions, by editing the repo's:
 

@@ -43,8 +43,8 @@ private final class MemoryStateStore: HandlerStateStore, @unchecked Sendable {
 }
 
 /// The config-driven reconciliation contract (Update02): app-router becomes the default
-/// handler for exactly the extensions/schemes the config uses — build-time declared, not
-/// over-broad — and relinquishes types the config no longer references.
+/// handler for exactly the extensions/schemes the config uses — never an over-broad
+/// supertype — and relinquishes types the config no longer references.
 @MainActor
 @Suite struct RegistrationTests {
 
@@ -127,17 +127,47 @@ private final class MemoryStateStore: HandlerStateStore, @unchecked Sendable {
         #expect(state.state.utis[jsonUTI] == nil)
     }
 
-    @Test func reportsUnsupportedExtensionNotInDeclaredSet() async {
-        // .png resolves to public.png, which is not in the declared set.
+    @Test func registersExtensionWhoseTypeIsNotExplicitlyDeclared() async {
+        // .png resolves to public.png, which is not in the declared set. The catch-all
+        // public.data document type (Update007) lets app-router claim it anyway.
         let registry = MockRegistry()
         let state = MemoryStateStore()
         let controller = makeController(registry: registry, stateStore: state, selfID: "self")
 
         let result = await controller.reconcileHandlers(for: config(extensions: ["png"]))
 
-        #expect(result.registered == 0)
-        #expect(registry.setUTIs.isEmpty)
-        #expect(result.unsupported == ["png"])
+        #expect(result.registered == 1)
+        #expect(registry.setUTIs == ["public.png"])
+        #expect(result.unsupported.isEmpty)
+    }
+
+    @Test func registersDynamicTypeForUnknownExtension() async throws {
+        // An extension macOS has no real type for resolves to a dyn.* UTI; it must be
+        // claimed directly instead of being reported as needing an app update.
+        let ext = "zqxrouterprobe"
+        let dyn = try #require(UTType(filenameExtension: ext))
+        try #require(dyn.isDynamic)
+        let registry = MockRegistry()
+        let controller = makeController(registry: registry, stateStore: MemoryStateStore(), selfID: "self")
+
+        let result = await controller.reconcileHandlers(for: config(extensions: [ext]))
+
+        #expect(registry.setUTIs == [dyn.identifier])
+        #expect(result.unsupported.isEmpty)
+    }
+
+    @Test func ownsPreferredTypeAndDeclaredAlternatesOnly() {
+        let owned = AppController.ownedUTIs(
+            candidates: ["public.mpeg-2-transport-stream", "com.microsoft.typescript", "x.undeclared"],
+            declared: ["com.microsoft.typescript"]
+        )
+        #expect(owned == ["public.mpeg-2-transport-stream", "com.microsoft.typescript"])
+    }
+
+    @Test func neverOwnsOverBroadTypeEvenWhenPreferredOrDeclared() {
+        #expect(AppController.ownedUTIs(candidates: ["public.data"], declared: []).isEmpty)
+        #expect(AppController.ownedUTIs(candidates: ["public.text", "public.plain-text"], declared: ["public.text"]).isEmpty)
+        #expect(AppController.ownedUTIs(candidates: ["public.content", "public.json"], declared: ["public.json"]) == ["public.json"])
     }
 
     @Test func registersPlainTextWhenConfigRoutesTxt() async {
@@ -169,8 +199,10 @@ private final class MemoryStateStore: HandlerStateStore, @unchecked Sendable {
 
         let result = await controller.reconcileHandlers(for: config(extensions: ["txt"]))
 
-        #expect(registry.setUTIs.isEmpty)
-        #expect(result.unsupported == ["txt"])
+        // Only the concrete type is claimed, never the declared supertype.
+        #expect(registry.setUTIs == ["public.plain-text"])
+        #expect(!registry.setUTIs.contains("public.text"))
+        #expect(result.unsupported.isEmpty)
     }
 
     @Test func registersSchemesOnlyWhenConfigHasURLRules() async {
@@ -205,12 +237,14 @@ private final class MemoryStateStore: HandlerStateStore, @unchecked Sendable {
         #expect(result.failedTypes == [jsonUTI])
     }
 
-    @Test func extensionsDifferingOnlyByCaseAreReportedOnce() async {
-        let controller = makeController(registry: MockRegistry(), stateStore: MemoryStateStore(), selfID: "self")
+    @Test func extensionsDifferingOnlyByCaseAreRegisteredOnce() async {
+        let registry = MockRegistry()
+        let controller = makeController(registry: registry, stateStore: MemoryStateStore(), selfID: "self")
 
         let result = await controller.reconcileHandlers(for: config(extensions: ["PNG", "png"]))
 
-        #expect(result.unsupported == ["png"])
+        #expect(registry.setUTIs == ["public.png"])
+        #expect(result.unsupported.isEmpty)
     }
 
     /// `.md` has two declared types here; which one is preferred varies by Mac, so the test

@@ -395,13 +395,13 @@ public final class AppController: NSObject, NSApplicationDelegate {
 
     /// Manual "Register as Default Handler…" menu action. Now config-driven (Update02): it
     /// reconciles the OS default handlers to the *current* config and reports the result,
-    /// including any config extensions that fall outside app-router's built-in type set.
+    /// including any config extensions that resolve only to an over-broad type.
     @objc private func registerDefaults() {
         Task {
             let result = await reconcileHandlers(for: store.current)
             var summary = "Registered \(result.registered), restored \(result.restored), failed \(result.failed)."
             if !result.unsupported.isEmpty {
-                summary += "\n\nNot in app-router's built-in type set (can't be registered without an app update): "
+                summary += "\n\nNot registerable (no specific file type — only an over-broad one like plain text or data): "
                     + result.unsupported.sorted().map { ".\($0)" }.joined(separator: ", ") + "."
             }
             Log.registration.notice("registration complete — \(summary, privacy: .public)")
@@ -433,7 +433,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 + failedTypes.sorted().joined(separator: ", "))
         }
         if !unsupported.isEmpty {
-            parts.append("Not registerable (not in built-in type set): "
+            parts.append("Not registerable (over-broad type): "
                 + unsupported.sorted().map { ".\($0)" }.joined(separator: ", "))
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
@@ -533,14 +533,15 @@ public final class AppController: NSObject, NSApplicationDelegate {
     }
 
     /// The UTIs app-router should own for `config`: each config extension resolved to its
-    /// UTIs, kept only when build-time declared *and* not over-broad. Every type registered
-    /// for the extension is considered (not just the system's preferred one), so a declared
-    /// type still counts on a Mac where another app claims the same extension.
-    /// Extensions that resolve to no UTI, an undeclared UTI, or an over-broad supertype are
-    /// returned as `unsupported` so the shell can tell the user they need an app update.
-    /// `primary` holds each extension's first owned type — the system's preferred one when
-    /// declared, so the type its files actually get. Only a failure to claim one of these
-    /// means an extension won't route.
+    /// UTIs (see `ownedUTIs`). Info.plist declares a catch-all `public.data` document type
+    /// with `LSHandlerRank` None (Update007), so Launch Services accepts app-router as the
+    /// default for *any* concrete or dynamic (`dyn.*`) type — a config extension no longer
+    /// has to be baked into the build to be registerable.
+    /// Extensions that resolve to no UTI or only to an over-broad supertype are returned as
+    /// `unsupported` so the shell can name them.
+    /// `primary` holds each extension's first owned type — the system's preferred one, so
+    /// the type its files actually get. Only a failure to claim one of these means an
+    /// extension won't route.
     private func desiredUTIs(for config: RouterConfig) -> (utis: Set<String>, primary: Set<String>, unsupported: [String]) {
         let declared = Set(declaredUTIsProvider())
         var utis = Set<String>()
@@ -550,12 +551,10 @@ public final class AppController: NSObject, NSApplicationDelegate {
         var unsupported = Set<String>()
         for ext in config.extensions.keys {
             let key = ext.lowercased()
-            // Claim every declared type for the extension, not just one: which of them a
-            // given file actually gets (e.g. `.md` → public.markdown vs
-            // net.daringfireball.markdown) depends on the apps installed on that Mac.
-            let owned = Self.candidateTypes(forExtension: key)
-                .map(\.identifier)
-                .filter { declared.contains($0) && !Self.overBroadUTIs.contains($0) }
+            let owned = Self.ownedUTIs(
+                candidates: Self.candidateTypes(forExtension: key).map(\.identifier),
+                declared: declared
+            )
             guard let first = owned.first else {
                 unsupported.insert(key)
                 continue
@@ -564,6 +563,20 @@ public final class AppController: NSObject, NSApplicationDelegate {
             utis.formUnion(owned)
         }
         return (utis, primary, unsupported.sorted())
+    }
+
+    /// Which of an extension's candidate UTIs (system-preferred first) app-router claims:
+    /// the system-preferred type — the one its files actually get on this Mac, declared or
+    /// not — plus any other candidate Info.plist declares explicitly. Which of several types
+    /// a file gets (e.g. `.md` → public.markdown vs net.daringfireball.markdown) depends on
+    /// the apps installed, so declared alternates are claimed too. Undeclared alternates are
+    /// not: an extension can share a secondary type with unrelated files (e.g. `.ts` is also
+    /// an MPEG-2 transport stream). Over-broad supertypes are never claimed.
+    static func ownedUTIs(candidates: [String], declared: Set<String>) -> [String] {
+        candidates.enumerated()
+            .filter { $0.offset == 0 || declared.contains($0.element) }
+            .map(\.element)
+            .filter { !overBroadUTIs.contains($0) }
     }
 
     /// The URL schemes app-router should own for `config`: the declared schemes, but only
